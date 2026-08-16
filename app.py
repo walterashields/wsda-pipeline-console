@@ -14,9 +14,10 @@ Run with: python3 app.py
 Opens at: http://localhost:7500
 """
 
+import yaml
 from flask import Flask, redirect, render_template_string, request, url_for
 
-from console import format_tiers, projects, trend_source
+from console import format_tiers, generator, projects, trend_source
 
 app = Flask(__name__)
 
@@ -221,13 +222,23 @@ def project_detail(slug):
     tier = format_tiers.get(project.format_tier)
     video_rows = ""
     for v in project.videos:
+        vid = v["video_id"]
+        has_script = project.script_path(vid).exists()
+        action_btn = (
+            f'<a class="btn secondary small" href="/projects/{slug}/videos/{vid}/edit">Edit script</a>'
+            if has_script else
+            f'<a class="btn small" href="/projects/{slug}/videos/{vid}/edit">Generate</a>'
+        )
         video_rows += f"""
         <div class="video-row">
           <div>
-            <strong>{v['video_id']}</strong>
+            <strong>{vid}</strong>
             <span class="muted">{v.get('title') or '(not generated yet)'}</span>
           </div>
-          <span class="status {v['status']}">{v['status'].replace('_', ' ')}</span>
+          <div class="row">
+            <span class="status {v['status']}">{v['status'].replace('_', ' ')}</span>
+            {action_btn}
+          </div>
         </div>"""
 
     content = f"""
@@ -243,6 +254,108 @@ def project_detail(slug):
     <a class="btn secondary" href="/">&larr; All projects</a>
     """
     return render_page(content)
+
+
+@app.route("/projects/<slug>/videos/<video_id>/edit")
+def edit_video(slug, video_id):
+    project = projects.load_project(slug)
+    if project is None or project.video(video_id) is None:
+        return render_page('<p class="muted">Not found.</p>'), 404
+
+    script_path = project.script_path(video_id)
+    error = request.args.get("error", "")
+    error_block = f'<div class="card" style="border-color:var(--red);"><p style="color:var(--red);">{error}</p></div>' if error else ""
+
+    if script_path.exists():
+        script_text = script_path.read_text()
+        content = f"""
+        {error_block}
+        <div class="card">
+          <div class="card-title">{video_id} &middot; script</div>
+          <form method="POST" action="/projects/{slug}/videos/{video_id}/script">
+            <textarea name="script_text" rows="34" spellcheck="false">{script_text}</textarea>
+            <div class="row" style="margin-top:14px;">
+              <button class="btn" type="submit">Save</button>
+              <span class="muted">Raw lesson_script.yml -- edits are saved as-is, no validation beyond YAML parsing before render.</span>
+            </div>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-title">Regenerate</div>
+          <form method="POST" action="/projects/{slug}/videos/{video_id}/generate">
+            <label>Workflow guidance (optional)</label>
+            <input type="text" name="workflow_hint" placeholder="e.g. add a second chart to the existing dashboard">
+            <div style="margin-top:12px;">
+              <button class="btn secondary" type="submit">Regenerate from scratch</button>
+            </div>
+          </form>
+        </div>
+        """
+    else:
+        content = f"""
+        {error_block}
+        <form method="POST" action="/projects/{slug}/videos/{video_id}/generate" class="card">
+          <div class="card-title">Generate {video_id}</div>
+          <label>Workflow guidance (optional)</label>
+          <input type="text" name="workflow_hint" placeholder="e.g. add a second chart to the existing dashboard">
+          <p class="muted" style="margin-top:12px;">Calls the Anthropic API, grounded in LESSON_CONTENT_STANDARD.md, the
+          live Metabase schema, and this project's earlier videos. Produces a draft
+          for review here, not a script that renders automatically.</p>
+          <div style="margin-top:16px;">
+            <button class="btn" type="submit">Generate script</button>
+          </div>
+        </form>
+        """
+
+    content += f'<a class="btn secondary" href="/projects/{slug}">&larr; {slug}</a>'
+    return render_page(content)
+
+
+@app.route("/projects/<slug>/videos/<video_id>/generate", methods=["POST"])
+def generate_video_script(slug, video_id):
+    project = projects.load_project(slug)
+    if project is None or project.video(video_id) is None:
+        return render_page('<p class="muted">Not found.</p>'), 404
+
+    workflow_hint = request.form.get("workflow_hint", "")
+    project.update_video(video_id, status="generating")
+    projects.save_project(project)
+
+    try:
+        text = generator.generate_lesson_script(project, video_id, workflow_hint)
+    except Exception as exc:
+        project.update_video(video_id, status="planned")
+        projects.save_project(project)
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id, error=str(exc)))
+
+    title = None
+    try:
+        title = yaml.safe_load(text).get("title")
+    except Exception:
+        pass
+
+    project.update_video(video_id, status="generated", title=title, workflow_hint=workflow_hint,
+                          script_relpath=str(project.script_path(video_id).relative_to(project.dir())))
+    projects.save_project(project)
+    return redirect(url_for("edit_video", slug=slug, video_id=video_id))
+
+
+@app.route("/projects/<slug>/videos/<video_id>/script", methods=["POST"])
+def save_video_script(slug, video_id):
+    project = projects.load_project(slug)
+    if project is None or project.video(video_id) is None:
+        return render_page('<p class="muted">Not found.</p>'), 404
+
+    text = request.form["script_text"]
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id, error=f"Not valid YAML, not saved: {exc}"))
+
+    project.script_path(video_id).write_text(text)
+    project.update_video(video_id, status="generated", title=(parsed or {}).get("title"))
+    projects.save_project(project)
+    return redirect(url_for("edit_video", slug=slug, video_id=video_id))
 
 
 if __name__ == "__main__":
