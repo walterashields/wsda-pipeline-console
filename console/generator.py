@@ -156,6 +156,20 @@ Pause duration formula (seconds), matching every existing script:
            statements, first-time-concept explanations, closing beats),
            2.0 for a short one-sentence action line.
 A silent (unnarrated) action's pause is a fixed 1.0s settle time.
+
+HARD CONSTRAINT, more important than the formula above: narration/qa.py
+enforces a real per-format maximum pause duration and will not extend a
+pause past it (confirmed live, 2026-08-15 -- a script whose narration
+doesn't fit even after this cap is hit does not converge no matter how
+many times it's auto-fixed and re-recorded; the narration itself has to
+be shorter, not the pause longer). The exact cap for THIS video's format
+is given in the user prompt as `max_pause_s` -- every single narration
+line's word count must produce a pause, by the formula above, that stays
+UNDER that cap, with real margin (aim for at most ~70% of the cap so
+edge-tts's real synthesized clip length, which runs slightly longer than
+the word-count estimate, still fits). This is the single most common way
+a first-draft generated script fails in practice -- treat it as a hard
+per-line budget, not a rough guideline.
 """
 
 REQUIRES_STATE_SCHEMA = """
@@ -268,11 +282,32 @@ def _build_user_prompt(project, video_id: str, tier, workflow_hint: str) -> str:
     order = next(v["order"] for v in project.videos if v["video_id"] == video_id)
     total = len(project.videos)
 
+    # word_count/145*60 <= max_pause_s*0.85 margin, essentially no room for
+    # the 2.0-8.0s buffer convention at a tight cap -- floored rather than
+    # left to go arbitrarily small, since a handful of words can still be
+    # a real, if terse, sentence, but the formula alone would suggest an
+    # unusably tiny number for the tightest tier (micro, 2.5s: ~5 words).
+    max_words_per_line = max(8, int(tier.max_pause_s * 0.85 * 145 / 60))
+    tight_cap = tier.max_pause_s < 5.0
+
     return f"""Generate lesson_script.yml for video {order} of {total} in a
 project on the topic: "{project.topic}".
 
 Format tier: {tier.label} ({tier.video_count_label}). Recap style for
 this tier: {tier.recap_style}. {tier.description}
+
+This tier's real pause cap (max_pause_s) is {tier.max_pause_s}s -- per the
+HARD CONSTRAINT above, no single narration line should need more than
+roughly {max_words_per_line} words to stay safely under that cap (the
+2.0s/8.0s buffer convention doesn't fit inside a cap this tight -- use
+little to no buffer instead of chasing that formula literally). If the
+topic genuinely needs more explanation than that per beat, split it
+across more events/pauses rather than writing one long narration line.
+{"This cap is tight enough that the right response is FEWER narrated events with short, real sentences, not many events each awkwardly truncated -- prefer 3-5 total narrated beats over the ~8-10 a lesson-format script would use, and let more steps stay silent/administrative (per the content standard's own carve-out for genuinely non-teaching clicks) rather than forcing reasoning into a line that can't fit it." if tight_cap else ""}
+Set the top-level `format: "{tier.pipeline_format}"` field in the output
+YAML -- this is what narration/qa.py actually reads to know which cap
+applies; omitting it silently defaults to a different, looser cap that
+does not match this tier.
 
 This video's position: {order} of {total} in the sequence.
 {"This is the FIRST video -- no requires_state, no recap of a prior video." if order == 1 else "This is NOT the first video -- its opening narration should recap what's genuinely true from earlier videos in this project (see LESSON_CONTENT_STANDARD.md's chapter-opener vs. within-chapter recap textures), and its requires_state should declare whatever real prior state this video's workflow actually needs, using the exact names produced below."}

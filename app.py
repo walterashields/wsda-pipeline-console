@@ -15,9 +15,9 @@ Opens at: http://localhost:7500
 """
 
 import yaml
-from flask import Flask, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
-from console import format_tiers, generator, projects, state_chain, trend_source
+from console import format_tiers, generator, projects, render_runner, state_chain, trend_source
 
 app = Flask(__name__)
 
@@ -229,6 +229,15 @@ def project_detail(slug):
             if has_script else
             f'<a class="btn small" href="/projects/{slug}/videos/{vid}/edit">Generate</a>'
         )
+        render_btn = ""
+        if has_script:
+            render_btn = f"""
+            <form method="POST" action="/projects/{slug}/videos/{vid}/render" style="display:inline;">
+              <button class="btn small" type="submit">Render</button>
+            </form>"""
+        job_link = ""
+        if v.get("job_id"):
+            job_link = f'<a class="btn secondary small" href="/jobs/{v["job_id"]}">Job</a>'
         video_rows += f"""
         <div class="video-row">
           <div>
@@ -238,6 +247,8 @@ def project_detail(slug):
           <div class="row">
             <span class="status {v['status']}">{v['status'].replace('_', ' ')}</span>
             {action_btn}
+            {render_btn}
+            {job_link}
           </div>
         </div>"""
 
@@ -409,6 +420,75 @@ def save_video_script(slug, video_id):
     project.update_video(video_id, status="generated", title=(parsed or {}).get("title"))
     projects.save_project(project)
     return redirect(url_for("edit_video", slug=slug, video_id=video_id))
+
+
+@app.route("/projects/<slug>/videos/<video_id>/render", methods=["POST"])
+def render_video(slug, video_id):
+    project = projects.load_project(slug)
+    if project is None or project.video(video_id) is None:
+        return render_page('<p class="muted">Not found.</p>'), 404
+
+    try:
+        job_id = render_runner.start_render(project, video_id)
+    except Exception as exc:
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id, error=str(exc)))
+    return redirect(url_for("job_status", job_id=job_id))
+
+
+@app.route("/jobs/<job_id>")
+def job_status(job_id):
+    job = render_runner.get_job(job_id)
+    if job is None:
+        return render_page('<p class="muted">Job not found (console was likely restarted since it ran).</p>'), 404
+
+    content = f"""
+    <div class="card">
+      <div class="card-title">Render job {job_id} &middot; {job['slug']} / {job['video_id']}</div>
+      <p><span class="status {'rendered' if job['status']=='done' else ('render_failed' if job['status']=='failed' else 'rendering')}" id="status-badge">{job['status']}</span>
+         <span class="muted" id="phase-label">phase: {job['phase']}</span>
+         <span class="muted" id="elapsed-label"></span></p>
+      <pre id="log-box" style="background:var(--bg); border:1px solid var(--border); border-radius:8px;
+           padding:14px; margin-top:14px; max-height:420px; overflow-y:auto; font-size:12px;
+           white-space:pre-wrap; font-family: ui-monospace, monospace;">{chr(10).join(job['log'][-300:])}</pre>
+      <div id="result-box" style="margin-top:14px;"></div>
+    </div>
+    <a class="btn secondary" href="/projects/{job['slug']}">&larr; {job['slug']}</a>
+
+    <script>
+    const jobId = {job_id!r};
+    const startedAt = {job['started_at']};
+    function poll() {{
+      fetch(`/api/jobs/${{jobId}}`).then(r => r.json()).then(data => {{
+        document.getElementById('status-badge').textContent = data.status;
+        document.getElementById('status-badge').className = 'status ' + (data.status === 'done' ? 'rendered' : (data.status === 'failed' ? 'render_failed' : 'rendering'));
+        document.getElementById('phase-label').textContent = 'phase: ' + data.phase;
+        const elapsed = Math.round((data.finished_at || (Date.now()/1000)) - data.started_at);
+        document.getElementById('elapsed-label').textContent = elapsed + 's elapsed';
+        const box = document.getElementById('log-box');
+        box.textContent = data.log.slice(-300).join('\\n');
+        box.scrollTop = box.scrollHeight;
+        if (data.status === 'done') {{
+          document.getElementById('result-box').innerHTML =
+            '<p class="muted">Final video: <code>' + data.result.final_mp4 + '</code></p>';
+        }} else if (data.status === 'failed') {{
+          document.getElementById('result-box').innerHTML =
+            '<p style="color:var(--red);">' + (data.error || 'render failed') + '</p>';
+        }}
+        if (data.status === 'running') setTimeout(poll, 2000);
+      }});
+    }}
+    poll();
+    </script>
+    """
+    return render_page(content)
+
+
+@app.route("/api/jobs/<job_id>")
+def api_job_status(job_id):
+    job = render_runner.get_job(job_id)
+    if job is None:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(job)
 
 
 if __name__ == "__main__":
