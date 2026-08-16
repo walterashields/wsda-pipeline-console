@@ -14,10 +14,13 @@ Run with: python3 app.py
 Opens at: http://localhost:7500
 """
 
-import yaml
-from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from pathlib import Path
 
-from console import format_tiers, generator, projects, render_runner, state_chain, trend_source
+import yaml
+from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
+
+from console import format_tiers, generator, projects, qa, render_runner, state_chain, trend_source
+from console.paths import OUTPUT_DIR
 
 app = Flask(__name__)
 
@@ -238,6 +241,9 @@ def project_detail(slug):
         job_link = ""
         if v.get("job_id"):
             job_link = f'<a class="btn secondary small" href="/jobs/{v["job_id"]}">Job</a>'
+        qa_link = ""
+        if v["status"] in ("rendered", "qa_pending", "approved", "flagged"):
+            qa_link = f'<a class="btn secondary small" href="/projects/{slug}/videos/{vid}/qa">Review / QA</a>'
         video_rows += f"""
         <div class="video-row">
           <div>
@@ -249,6 +255,7 @@ def project_detail(slug):
             {action_btn}
             {render_btn}
             {job_link}
+            {qa_link}
           </div>
         </div>"""
 
@@ -481,6 +488,107 @@ def job_status(job_id):
     </script>
     """
     return render_page(content)
+
+
+@app.route("/projects/<slug>/videos/<video_id>/qa", methods=["GET", "POST"])
+def video_qa(slug, video_id):
+    project = projects.load_project(slug)
+    video = project.video(video_id) if project else None
+    if project is None or video is None:
+        return render_page('<p class="muted">Not found.</p>'), 404
+
+    if request.method == "POST":
+        checked = request.form.getlist("human_checked")
+        notes = request.form.get("notes", "")
+        action = request.form.get("action")
+        stored_qa = video.qa or {}
+        stored_qa["human_checked"] = [int(x) for x in checked]
+        stored_qa["notes"] = notes
+        new_status = "approved" if action == "approve" else ("flagged" if action == "flag" else video.status)
+        project.update_video(video_id, qa=stored_qa, status=new_status,
+                              notes=notes if action == "flag" else video.notes)
+        projects.save_project(project)
+        return redirect(url_for("video_qa", slug=slug, video_id=video_id))
+
+    render = video.render or {}
+    script_path = project.script_path(video_id)
+    automated = []
+    if script_path.exists() and render.get("mp4"):
+        try:
+            automated = qa.run_automated_checks(
+                script_path,
+                Path(render["audit_json"]) if render.get("audit_json") else None,
+                Path(render.get("final_mp4") or render["mp4"]),
+            )
+        except Exception as exc:
+            automated = [{"id": 0, "status": "fail", "detail": f"could not run automated checks: {exc}"}]
+    automated_by_id = {c["id"]: c for c in automated}
+
+    stored_qa = video.qa or {}
+    checked_ids = set(stored_qa.get("human_checked", []))
+
+    preview_html = ""
+    final_mp4 = render.get("final_mp4")
+    if final_mp4 and Path(final_mp4).exists():
+        preview_html = f"""
+        <div class="card">
+          <div class="card-title">Preview</div>
+          <video controls style="width:100%; border-radius:8px; background:#000;" src="/media/{Path(final_mp4).name}"></video>
+        </div>"""
+
+    rows = ""
+    for item in qa.CHECKLIST_ITEMS:
+        auto = automated_by_id.get(item["id"])
+        auto_html = ""
+        if item["classification"] in ("Automated", "Both") and auto:
+            color = {"pass": "var(--green)", "fail": "var(--red)", "warn": "var(--yellow)", "not_applicable": "var(--text-dim)"}[auto["status"]]
+            auto_html = f'<div style="color:{color}; margin-top:4px;">[{auto["status"]}] {auto["detail"]}</div>'
+        human_html = ""
+        if item["classification"] in ("Human", "Both") and item["human_prompt"]:
+            checked_attr = "checked" if item["id"] in checked_ids else ""
+            human_html = f"""
+            <label style="display:flex; align-items:flex-start; gap:8px; margin-top:8px; cursor:pointer;">
+              <input type="checkbox" name="human_checked" value="{item['id']}" {checked_attr} style="width:auto; margin-top:3px;">
+              <span class="muted">{item['human_prompt']}</span>
+            </label>"""
+        rows += f"""
+        <div class="card">
+          <div class="card-title">{item['id']}. {item['title']} <span class="muted" style="text-transform:none;">({item['classification']})</span></div>
+          {auto_html}
+          {human_html}
+        </div>"""
+
+    content = f"""
+    <form method="POST">
+      <h3 style="margin-bottom:16px;">QA &middot; {video_id} &middot; {project.topic}</h3>
+      {preview_html}
+      {rows}
+      <div class="card">
+        <label>Notes</label>
+        <textarea name="notes" rows="3">{stored_qa.get('notes', '')}</textarea>
+        <div class="row" style="margin-top:16px;">
+          <button class="btn" type="submit" name="action" value="approve">Approve</button>
+          <button class="btn secondary" type="submit" name="action" value="flag">Flag for another pass</button>
+          <button class="btn secondary" type="submit" name="action" value="save">Save progress</button>
+        </div>
+      </div>
+    </form>
+    <a class="btn secondary" href="/projects/{slug}">&larr; {slug}</a>
+    """
+    return render_page(content)
+
+
+@app.route("/media/<path:filename>")
+def media(filename):
+    # Serves rendered videos straight out of wsda-video-engine's own
+    # output/ dir for in-browser preview -- filename only (no directory
+    # components), resolved against OUTPUT_DIR and re-checked to still be
+    # inside it, so a crafted "../../" can't walk this out to an
+    # arbitrary path on disk.
+    path = (OUTPUT_DIR / filename).resolve()
+    if not str(path).startswith(str(OUTPUT_DIR.resolve())) or not path.exists():
+        abort(404)
+    return send_file(path)
 
 
 @app.route("/api/jobs/<job_id>")
