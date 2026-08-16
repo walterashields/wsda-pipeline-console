@@ -30,55 +30,84 @@ BASE_CSS = """
   --bg: #0f1923; --surface: #1a2535; --surface-2: #212f42; --border: #2a3a50;
   --text: #e8eef5; --text-dim: #6b8299; --green: #06c015; --blue: #4a9eff;
   --yellow: #ffd700; --red: #ff4a4a; --radius: 10px;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "DM Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
-body { font-family: var(--font); background: var(--bg); color: var(--text);
-       min-height: 100vh; padding: 40px 20px; }
+body { font-family: var(--font); background:
+         radial-gradient(700px 420px at 12% 0%, rgba(6,192,21,.05), transparent 60%),
+         radial-gradient(600px 380px at 100% 0%, rgba(74,158,255,.035), transparent 55%),
+         var(--bg);
+       background-repeat: no-repeat;
+       color: var(--text); min-height: 100vh; padding: 40px 20px; }
 .container { max-width: 920px; margin: 0 auto; }
 a { color: inherit; text-decoration: none; }
 .logo { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
-.logo-mark { width: 36px; height: 36px; background: var(--green); border-radius: 8px;
+.logo-mark { width: 36px; height: 36px; border-radius: 9px;
+             background: linear-gradient(155deg, var(--green) 0%, #049c10 100%);
+             box-shadow: 0 2px 10px -2px rgba(6,192,21,.5), inset 0 1px 0 rgba(255,255,255,.25);
              display: flex; align-items: center; justify-content: center;
-             font-weight: 900; font-size: 16px; color: #000; }
-.logo-text { font-size: 19px; font-weight: 700; }
-.logo-sub { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+             font-family: var(--font-mono); font-weight: 500; font-size: 16px; color: #06130a; }
+.logo-text { font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.logo-sub { font-size: 12px; color: var(--text-dim); margin-top: 1px;
+            font-family: var(--font-mono); }
 .card { background: var(--surface); border: 1px solid var(--border);
-        border-radius: var(--radius); padding: 26px; margin-bottom: 18px; }
+        border-radius: var(--radius); padding: 26px; margin-bottom: 18px;
+        box-shadow: 0 1px 0 rgba(255,255,255,.02) inset, 0 8px 24px -12px rgba(0,0,0,.4);
+        transition: border-color .15s ease; }
 .card-title { font-size: 12px; font-weight: 700; color: var(--text-dim);
-              text-transform: uppercase; letter-spacing: .06em; margin-bottom: 16px; }
-.btn { display: inline-block; background: var(--green); color: #000; font-weight: 700;
+              text-transform: uppercase; letter-spacing: .08em; margin-bottom: 16px;
+              font-family: var(--font-mono); }
+.btn { display: inline-block; background: var(--green); color: #06130a; font-weight: 700;
        border: none; border-radius: 8px; padding: 11px 20px; font-size: 14px;
-       cursor: pointer; }
-.btn.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+       cursor: pointer; font-family: var(--font); letter-spacing: -.01em;
+       box-shadow: 0 2px 8px -2px rgba(6,192,21,.45);
+       transition: transform .12s ease, box-shadow .12s ease, filter .12s ease; }
+.btn:hover { transform: translateY(-1px); filter: brightness(1.06);
+             box-shadow: 0 4px 14px -3px rgba(6,192,21,.6); }
+.btn:active { transform: translateY(0); }
+.btn.secondary { background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+                 box-shadow: none; }
+.btn.secondary:hover { border-color: #3a5170; background: #263650; }
 .btn.small { padding: 6px 12px; font-size: 12px; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .chip { border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px;
-        cursor: pointer; background: var(--surface-2); flex: 1; min-width: 180px; }
+        cursor: pointer; background: var(--surface-2); flex: 1; min-width: 180px;
+        transition: border-color .12s ease, background .12s ease, transform .12s ease; }
+.chip:hover { border-color: #3a5170; transform: translateY(-1px); }
 .chip.selected { border-color: var(--green); background: #10371a; }
 .chip-label { font-weight: 700; font-size: 14px; }
 .chip-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
-label { display: block; font-size: 12px; color: var(--text-dim); margin: 14px 0 6px; }
+label:not(.chip) { display: block; font-size: 11px; color: var(--text-dim); margin: 14px 0 6px;
+        text-transform: uppercase; letter-spacing: .06em; font-family: var(--font-mono); }
 input[type=text], input[type=number], select, textarea {
   width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
-  border-radius: 8px; padding: 10px 12px; font-size: 14px; font-family: inherit; }
-textarea { font-family: ui-monospace, monospace; font-size: 13px; line-height: 1.5; }
+  border-radius: 8px; padding: 10px 12px; font-size: 14px; font-family: inherit;
+  transition: border-color .12s ease, box-shadow .12s ease; }
+input[type=text]:focus, input[type=number]:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--green); box-shadow: 0 0 0 3px rgba(6,192,21,.15); }
+textarea { font-family: var(--font-mono); font-size: 13px; line-height: 1.55; }
 .status { display: inline-block; padding: 3px 9px; border-radius: 6px; font-size: 11px;
-          font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+          font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+          font-family: var(--font-mono); }
 .status.planned { background: #2a3a50; color: var(--text-dim); }
 .status.generating, .status.rendering { background: #3a2f0a; color: var(--yellow); }
 .status.generated, .status.rendered { background: #123a1a; color: var(--green); }
 .status.qa_pending { background: #123a1a; color: var(--blue); }
-.status.approved { background: #06c015; color: #000; }
+.status.approved { background: #06c015; color: #06130a; }
 .status.flagged, .status.render_failed, .status.needs_fix { background: #3a1414; color: var(--red); }
 .video-row { display: flex; justify-content: space-between; align-items: center;
              padding: 12px 0; border-bottom: 1px solid var(--border); }
 .video-row:last-child { border-bottom: none; }
 .muted { color: var(--text-dim); font-size: 13px; }
 .project-row { display: flex; justify-content: space-between; align-items: center;
-               padding: 14px 0; border-bottom: 1px solid var(--border); }
+               padding: 14px 0; border-bottom: 1px solid var(--border);
+               transition: padding-left .12s ease; }
+.project-row:hover { padding-left: 4px; }
 .project-row:last-child { border-bottom: none; }
-.tier-badge { font-size: 11px; padding: 3px 9px; border-radius: 6px;
+.tier-badge { font-size: 11px; padding: 3px 9px; border-radius: 6px; font-family: var(--font-mono);
               background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim); }
+pre, code { font-family: var(--font-mono); }
+::selection { background: rgba(6,192,21,.35); }
 """
 
 BASE_HTML = """<!DOCTYPE html>
@@ -86,7 +115,10 @@ BASE_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WSDA Pipeline Console</title>
-<style>{{ css }}</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700;9..40,900&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>{{ css|safe }}</style>
 </head>
 <body>
 <div class="container">
