@@ -49,7 +49,8 @@ def project_dependency_chain(project) -> list:
     requires_state's something no earlier video in this project actually
     produces) is visible before anything is ever rendered."""
     chain = []
-    produced_so_far = {}  # (type, name) -> video_id that produces it
+    produced_so_far = {}  # (type, name) -> video_id that first produces it
+    dashboard_cards_so_far = {}  # dashboard name -> accumulated question names
 
     for v in project.videos:
         entry = {
@@ -72,7 +73,19 @@ def project_dependency_chain(project) -> list:
                 })
         chain.append(entry)
 
+        # A dashboard's real "contains" set accumulates across every video
+        # that pins to it (state_seed.py's dashboard seeding adds missing
+        # cards rather than replacing them) -- shown here as the running
+        # total, not just what THIS video's own script saved, so the view
+        # doesn't undersell a dashboard a later video adds a second chart
+        # to.
         for p in entry["produces"]:
             produced_so_far[(p["type"], p["name"])] = v["video_id"]
+            if p["type"] == "dashboard":
+                accumulated = dashboard_cards_so_far.setdefault(p["name"], [])
+                for card_name in p.get("contains", []):
+                    if card_name not in accumulated:
+                        accumulated.append(card_name)
+                p["contains"] = list(accumulated)
 
     return chain

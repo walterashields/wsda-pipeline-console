@@ -17,7 +17,7 @@ Opens at: http://localhost:7500
 import yaml
 from flask import Flask, redirect, render_template_string, request, url_for
 
-from console import format_tiers, generator, projects, trend_source
+from console import format_tiers, generator, projects, state_chain, trend_source
 
 app = Flask(__name__)
 
@@ -241,6 +241,11 @@ def project_detail(slug):
           </div>
         </div>"""
 
+    chain_link = (
+        f'<a class="btn secondary small" href="/projects/{slug}/state-chain" style="margin-bottom:14px;display:inline-block;">View requires_state chain &rarr;</a>'
+        if len(project.videos) > 1 else ""
+    )
+
     content = f"""
     <div class="card">
       <div class="card-title">{project.topic}</div>
@@ -251,7 +256,55 @@ def project_detail(slug):
       <div class="card-title">Videos</div>
       {video_rows}
     </div>
+    {chain_link}
     <a class="btn secondary" href="/">&larr; All projects</a>
+    """
+    return render_page(content)
+
+
+@app.route("/projects/<slug>/state-chain")
+def project_state_chain(slug):
+    project = projects.load_project(slug)
+    if project is None:
+        return render_page('<p class="muted">Project not found.</p>'), 404
+
+    chain = state_chain.project_dependency_chain(project)
+
+    rows = ""
+    for entry in chain:
+        produces_html = "".join(
+            f'<div class="muted">&rarr; produces <strong>{p["type"]}</strong> "{p["name"]}"'
+            + (f' (contains: {", ".join(p["contains"])})' if p.get("contains") else "")
+            + "</div>"
+            for p in entry["produces"]
+        ) or '<div class="muted">&rarr; produces nothing declared</div>'
+
+        requires_html = ""
+        for r in entry["requires"]:
+            if r["satisfied_by"]:
+                requires_html += f'<div style="color:var(--green);">&larr; requires {r["type"]} "{r["name"]}" -- satisfied by {r["satisfied_by"]}</div>'
+            else:
+                requires_html += f'<div style="color:var(--red);">&larr; requires {r["type"]} "{r["name"]}" -- NOT produced by any earlier video in this project</div>'
+        if not entry["requires"]:
+            requires_html = '<div class="muted">&larr; requires nothing (no requires_state block)</div>'
+
+        script_state = "no script yet" if entry["status"] == "planned" and not entry["produces"] and not entry["requires"] else entry["status"]
+
+        rows += f"""
+        <div class="card">
+          <div class="card-title">{entry['video_id']} <span class="muted" style="text-transform:none;">({script_state})</span></div>
+          {requires_html}
+          {produces_html}
+        </div>"""
+
+    content = f"""
+    <h3 style="margin-bottom:16px;">requires_state chain &middot; {project.topic}</h3>
+    <p class="muted" style="margin-bottom:20px;">What each video in this project needs from earlier videos, and what it
+    leaves behind for later ones -- read directly from each video's own script (save_question /
+    add_to_dashboard events for what it produces, its requires_state block for what it needs), not
+    hand-maintained separately.</p>
+    {rows}
+    <a class="btn secondary" href="/projects/{slug}">&larr; {slug}</a>
     """
     return render_page(content)
 
