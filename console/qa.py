@@ -63,6 +63,9 @@ CHECKLIST_ITEMS = [
     {"id": 9, "title": "requires_state artifacts actually match reality after recording",
      "classification": "Automated",
      "human_prompt": None},
+    {"id": 10, "title": "Every filter/aggregation produces a real, non-empty result (pre-render gate)",
+     "classification": "Automated",
+     "human_prompt": None},
 ]
 
 CONCEPT_INTRO_ACTIONS = {"save_question", "add_to_dashboard"}
@@ -196,6 +199,29 @@ def _check_requires_state(card: dict) -> dict:
     return {"id": 9, "status": status, "detail": detail}
 
 
+def _check_pre_render_validation(script_path) -> dict:
+    """Re-surfaces item 10's result on the post-render QA page too, for a
+    complete record in one place -- the actual gate already ran and
+    blocked/allowed this render before it started (console/validator.py,
+    wired into app.py's generate/render routes), this is not a second
+    independent gate, just re-checking the same live query against
+    whatever Metabase state exists right now so the QA page shows current
+    truth, not a stale cached result from generation time."""
+    from console import validator
+    try:
+        result = validator.validate_script(script_path)
+    except Exception as exc:
+        return {"id": 10, "status": "fail", "detail": f"could not run: {exc}"}
+
+    if result["status"] == "unchecked":
+        return {"id": 10, "status": "not_applicable",
+                "detail": "no validations declared (no filter/aggregation step to check)"}
+    if result["status"] == "pass":
+        return {"id": 10, "status": "pass", "detail": "every declared query still returns a real result"}
+    failing = "; ".join(c["detail"] for c in result["checks"] if c["status"] != "pass")
+    return {"id": 10, "status": "fail", "detail": failing}
+
+
 def run_automated_checks(script_path, audit_json_path, mp4_path) -> list:
     card = yaml.safe_load(script_path.read_text())
     audit = __import__("json").loads(audit_json_path.read_text()) if audit_json_path and audit_json_path.exists() else {"events": []}
@@ -209,4 +235,5 @@ def run_automated_checks(script_path, audit_json_path, mp4_path) -> list:
             checks.append(_check_audio(str(mp4_path), audit_events))
         checks.append(_check_concept_intro_pacing(card_events, audit_events))
     checks.append(_check_requires_state(card))
+    checks.append(_check_pre_render_validation(script_path))
     return checks

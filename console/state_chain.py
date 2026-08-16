@@ -14,8 +14,21 @@ def produced_artifacts(script_text: str) -> list:
     """Scans a lesson script's events for save_question/add_to_dashboard
     actions and returns what this video, if run, would leave behind --
     the same shape a later video's requires_state block would need to
-    name to depend on it."""
-    card = yaml.safe_load(script_text) or {}
+    name to depend on it.
+
+    A script that fails to parse (confirmed live, 2026-08-16: a
+    generation that left invalid YAML on disk, e.g. a leftover markdown
+    fence) is treated as producing nothing, not raised -- this function
+    is called for EVERY video in a project while building context for
+    generating or regenerating any ONE of them, including the video
+    currently being (re)generated itself. A parse error on one video's
+    on-disk file used to take down the ability to generate or regenerate
+    ANY video in the project, including itself, which is a worse failure
+    than just not knowing what a broken script produces."""
+    try:
+        card = yaml.safe_load(script_text) or {}
+    except yaml.YAMLError:
+        return []
     produced = []
     dashboard_contents = {}
 
@@ -37,7 +50,10 @@ def produced_artifacts(script_text: str) -> list:
 
 
 def required_state(script_text: str) -> list:
-    card = yaml.safe_load(script_text) or {}
+    try:
+        card = yaml.safe_load(script_text) or {}
+    except yaml.YAMLError:
+        return []
     return card.get("requires_state") or []
 
 

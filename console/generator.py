@@ -33,6 +33,7 @@ import os
 import re
 
 import anthropic
+import yaml
 
 from console import metabase_schema, state_chain
 from console.paths import EXAMPLE_SCRIPTS, LESSON_CONTENT_STANDARD
@@ -207,6 +208,68 @@ Metabase's UI (e.g. "Created At"), not the raw column name (CREATED_AT)
 -- the seeding code normalizes this itself.
 """
 
+VALIDATIONS_SCHEMA = """
+validations (top-level key, list, REQUIRED whenever this video's workflow
+filters, aggregates, or otherwise produces a specific data result that
+the narration then describes -- added 2026-08-16, CRITICAL fix pass):
+
+This is a hard gate, not optional metadata. A real defect shipped
+because a generated script filtered Orders.Total to a range (500-5000)
+that returns ZERO rows against live data, and the narration described
+the (empty) result as if it were showing real orders -- the recording
+played out a false claim in Walter's own teaching voice over a blank
+table. console/validator.py runs every entry below against Metabase's
+real /api/dataset endpoint BEFORE a render is ever offered, and blocks
+the script if any of them fail. A data-producing step with no matching
+validations entry is not assumed safe -- it's flagged to the human
+reviewer as literally unchecked. So: every filter/aggregation this
+script performs must have a corresponding entry here, describing the
+SAME query in structured form (reusing requires_state's filter/
+aggregation/breakout shape) so it can actually be run and checked, not
+just narrated.
+
+  - event_id: "<the commit event id this validates, e.g. the add_filter
+              or click_option event that finalizes the filter/summarize
+              step>"
+    query:
+      database: "<database name>"
+      table: "<table name>"
+      filter:                        # optional, same shape as requires_state
+        field: "<field name>"
+        operator: "between"
+        min: <number>
+        max: <number>
+      aggregation:                   # optional
+        function: "sum" | "count"
+        field: "<field name, omit for count>"
+      breakout:                      # optional
+        field: "<field name>"
+        granularity: "month" | ...
+    expect:
+      min_rows: 1                    # default 1 if omitted -- raise this
+                                      # if the narration specifically
+                                      # claims a larger, specific count
+
+console/validator.py ALSO checks requires_state's own filter/aggregation
+specs the same way, not just this section's entries -- found live that a
+regenerated video declared requires_state depending on an earlier
+video's saved question using a stale, already-disproven filter range,
+inconsistent with what that earlier video's own (corrected) script
+actually uses now. If this video's requires_state names a question this
+project's own earlier video produces, use that earlier video's ACTUAL
+current filter/aggregation values (given above in "Earlier videos... and
+what they produce" is a name/type summary, not the values -- if in
+doubt, keep this video's own workflow independent of the exact prior
+filter values rather than guessing or drifting from them).
+
+Ground every filter/aggregation value against the REAL per-field ranges
+given in the live schema below (e.g. "real range: 8.94 to 159.35") --
+choosing a plausible-sounding round number (500, 5000, 1000000) with no
+relationship to those real numbers is exactly how the live defect above
+happened. A "high value" or "needs review" framing has to be a real
+subset of the actual data, not just a bigger-sounding number.
+"""
+
 
 def _read_examples() -> str:
     blocks = []
@@ -237,10 +300,37 @@ approximation of one.
 === requires_state SCHEMA ===
 {REQUIRES_STATE_SCHEMA}
 
-=== LIVE METABASE SCHEMA (query against this, not a guessed schema) ===
+=== validations SCHEMA (hard gate, read this carefully) ===
+{VALIDATIONS_SCHEMA}
+
+=== LIVE METABASE SCHEMA (query against this, not a guessed schema; use
+the real per-field ranges shown for every filter/aggregation value you
+choose) ===
 {schema}
 
-=== PROVEN WORKED EXAMPLES ===
+=== PROVEN WORKED EXAMPLES -- STRUCTURE AND MECHANICS ONLY ===
+Read these for event sequencing, locator kinds, pre_actions patterns,
+pause-duration formula, and first-time-concept pacing -- NOT for their
+scenario. Confirmed live (2026-08-16) that copying too closely here is a
+real failure mode, not a hypothetical one: a generated "SQL (general)"
+lesson reused this exact table (Orders), this exact filter field
+(Total), and a barely-reskinned version of the same "flag orders for
+review" framing and saved-question name, instead of generating content
+actually appropriate to its own topic. Do NOT reuse:
+  - the specific scenario (manager/support wanting a filtered list)
+  - the specific table chosen (Orders), unless THIS topic genuinely
+    calls for it -- Sample Database also has ACCOUNTS, FEEDBACK,
+    INVOICES, PEOPLE, PRODUCTS, REVIEWS; pick whichever one the actual
+    topic and workflow guidance below point to
+  - the specific field/filter range or aggregation these examples use
+  - the specific saved-question/dashboard names
+Do reuse the mechanical shape: highlight-then-commit event pairs,
+pre_actions revealing typed values before they're narrated, the pause
+formula, requires_state chaining between videos, and how first-time
+concepts get longer holds. The test of a good generation here is: could
+someone tell this was written FROM these examples, not just a copy OF
+one of them, retargeted at a different topic with its own real data
+grounding.
 {examples}
 
 === OUTPUT FORMAT ===
@@ -278,7 +368,7 @@ def _prior_context(project) -> str:
     return "\n".join(lines)
 
 
-def _build_user_prompt(project, video_id: str, tier, workflow_hint: str) -> str:
+def _build_user_prompt(project, video_id: str, tier, workflow_hint: str, feedback: str = "") -> str:
     order = next(v["order"] for v in project.videos if v["video_id"] == video_id)
     total = len(project.videos)
 
@@ -316,6 +406,21 @@ This video's position: {order} of {total} in the sequence.
 
 Workflow guidance from the author: {workflow_hint or "(none given -- use your judgment for a natural, scenario-grounded next step given the topic and this video's position in the sequence)"}
 
+{f'''=== FEEDBACK ON A PRIOR ATTEMPT -- ADDRESS THIS DIRECTLY, NOT OPTIONAL ===
+{feedback}
+This is either a human reviewer's note on a flagged render, or a
+pre-render validation failure from the LAST attempt at this exact video.
+Either way, the regenerated script below must demonstrably address it --
+a regeneration that repeats the same mistake (e.g. the same out-of-range
+filter, the same unaddressed complaint) is itself a failure of this
+step, confirmed as a real defect on this project (a flagged note about a
+broken filter range produced the identical broken filter range on
+regeneration, because the note was never actually passed into the
+prompt before this fix). If the feedback names a specific wrong value,
+use the real per-field ranges in the live schema above to pick a
+genuinely correct one, don't just adjust it slightly.
+''' if feedback else ""}
+
 lesson_id must be "{project.slug.replace('-', '_')}_{video_id}".
 course must be "{project.slug}".
 target must match every existing script's target block exactly:
@@ -328,21 +433,11 @@ target must match every existing script's target block exactly:
 """
 
 
-def generate_lesson_script(project, video_id: str, workflow_hint: str = "") -> str:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Script generation calls the "
-            "Anthropic API directly (this console is not running inside "
-            "Claude Code) -- set it in the environment and retry."
-        )
+MAX_GENERATION_ATTEMPTS = 2  # one shot plus one feedback-informed retry
 
-    from console import format_tiers
-    tier = format_tiers.get(project.format_tier)
 
+def _call_model(system_prompt: str, user_prompt: str) -> str:
     client = anthropic.Anthropic()
-    system_prompt = _build_system_prompt()
-    user_prompt = _build_user_prompt(project, video_id, tier, workflow_hint)
-
     # Extended thinking is on by default for this model and, left
     # unbounded, consumed nearly the entire max_tokens budget on its own
     # (confirmed live: 7893 of 8000 output tokens went to thinking, the
@@ -360,13 +455,109 @@ def generate_lesson_script(project, video_id: str, workflow_hint: str = "") -> s
     )
     text = "".join(block.text for block in response.content if block.type == "text")
 
-    # Strip a markdown fence if the model added one despite instructions,
-    # rather than failing generation over a cosmetic formatting slip.
-    fenced = re.match(r"^```(?:ya?ml)?\s*\n(.*)\n```\s*$", text.strip(), re.DOTALL)
+    # Strip a markdown fence if the model added one despite instructions
+    # not to -- confirmed live (2026-08-16) this isn't hypothetical: one
+    # generation prepended a full paragraph of reasoning before a ```yaml
+    # fence, which an earlier version of this regex (anchored to require
+    # the ENTIRE response to be just the fence, nothing before it) didn't
+    # match at all, so the literal prose-plus-fence-markers text got
+    # written to disk as "the script" -- invalid YAML that broke the
+    # validation gate itself (a real, load-bearing consequence, not a
+    # cosmetic one: script_path.read_text() -> yaml.safe_load() raised
+    # immediately). Fixed by searching for a fenced block ANYWHERE in the
+    # response and extracting just its contents, rather than requiring
+    # the fence to be the whole response.
+    fenced = re.search(r"```(?:ya?ml)?\s*\n(.*?)\n```", text, re.DOTALL)
     if fenced:
         text = fenced.group(1)
+    return text.strip() + "\n"
 
+
+def _validation_feedback(result: dict) -> str:
+    lines = ["The pre-render validation gate ran your last attempt's declared "
+             "validations against LIVE Metabase data and found real problems:"]
+    for c in result["checks"]:
+        if c["status"] != "pass":
+            lines.append(f"  - event {c['event_id']}: {c['detail']} (query: {c['query']})")
+    lines.append("Fix these specific steps using real data ranges from the live schema below "
+                  "-- do not just narrow the same wrong range slightly, pick values that actually "
+                  "produce the described result against real data.")
+    return "\n".join(lines)
+
+
+def generate_lesson_script(project, video_id: str, workflow_hint: str = "", feedback: str = "") -> dict:
+    """Returns {"text": str, "validation": {...}, "attempts": int}. The
+    pre-render validation gate (console/validator.py) runs automatically
+    as part of this call, per the 2026-08-16 CRITICAL fix pass -- a
+    script whose declared validations fail against live data gets ONE
+    automatic regeneration attempt with the specific failure fed back
+    into the prompt, not silently returned as if it were fine. Callers
+    (app.py) must check result["validation"]["passed"] before treating a
+    generated script as ready for review/render -- this function does not
+    raise on a validation failure after retries, since "generated but
+    flagged as unvalidated" is a real, useful state for the reviewer to
+    see, not an exceptional one."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Script generation calls the "
+            "Anthropic API directly (this console is not running inside "
+            "Claude Code) -- set it in the environment and retry."
+        )
+
+    from console import format_tiers, validator
+    tier = format_tiers.get(project.format_tier)
+    system_prompt = _build_system_prompt()
     script_path = project.script_path(video_id)
     script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(text)
-    return text
+
+    current_feedback = feedback
+    text = ""
+    validation = {"passed": False, "status": "unchecked", "checks": []}
+
+    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        user_prompt = _build_user_prompt(project, video_id, tier, workflow_hint, current_feedback)
+        text = _call_model(system_prompt, user_prompt)
+
+        # Confirmed live (2026-08-16): a generation can produce invalid
+        # YAML (a stray markdown fence or commentary the extraction regex
+        # didn't fully strip) -- this is a generation-quality problem,
+        # the same category as a failed data validation, not a reason to
+        # give up on the whole attempt loop after one try. Checked BEFORE
+        # writing to disk or calling the real-data validator, so a
+        # syntactically broken script is never what gets left behind.
+        try:
+            yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            validation = {"passed": False, "status": "fail", "checks": [],
+                          "error": f"generated output is not valid YAML: {exc}"}
+            if attempt < MAX_GENERATION_ATTEMPTS:
+                current_feedback = (f"Your last attempt did not produce valid YAML "
+                                     f"(parse error: {exc}). Output ONLY the lesson_script.yml "
+                                     f"content, no markdown code fences, no commentary before or "
+                                     f"after it, starting directly with `lesson_id:`.")
+                continue
+            break
+
+        script_path.write_text(text)
+
+        try:
+            validation = validator.validate_script(script_path)
+        except Exception as exc:
+            # Metabase unreachable or similar -- don't claim a pass we
+            # never actually checked, but don't burn a retry on
+            # infrastructure being down either.
+            validation = {"passed": False, "status": "unchecked", "checks": [],
+                          "error": f"validation could not run: {exc}"}
+            break
+
+        if validation["status"] == "pass":
+            break
+        if validation["status"] == "unchecked":
+            # No validations declared at all -- not a data-correctness
+            # failure to retry against, just an authoring gap. Surfaced
+            # to the reviewer as-is rather than looping.
+            break
+        if attempt < MAX_GENERATION_ATTEMPTS:
+            current_feedback = _validation_feedback(validation)
+
+    return {"text": text, "validation": validation, "attempts": attempt}

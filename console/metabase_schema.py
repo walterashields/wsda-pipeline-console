@@ -4,6 +4,19 @@ not hardcoded, same discipline as automation/state_seed.py's own table/
 field resolution: this project's own history (MULTI_VIDEO_PROGRESSION_
 FINDINGS.md) is full of real bugs caused by trusting a remembered/assumed
 shape of the data over what the live instance actually has.
+
+Real per-field min/max/avg (numeric) and earliest/latest (datetime)
+ranges are included alongside each field name (added 2026-08-16, CRITICAL
+fix pass), not just the field's name and type. Root cause of a real,
+live defect this addresses directly: a generated script filtered
+Orders.Total to $500-$5000 -- a plausible-sounding "high value" range
+with no relationship to the real data, which actually tops out at
+$159.35. Without a real number to ground against, there's nothing
+stopping a plausible-sounding guess; this makes the actual range part of
+what the model is generating against, not a fact it has to invent. This
+narrows the failure mode but doesn't close it alone -- console/
+validator.py is the actual hard gate; this is the mitigation that should
+make the gate rarely need to fire in the first place.
 """
 
 import requests
@@ -42,9 +55,25 @@ def fetch_schema_summary() -> str:
             headers=headers, timeout=15,
         ).json()
         for table in meta.get("tables", []):
-            field_names = ", ".join(
-                f"{f['name']} ({f['base_type'].removeprefix('type/')})"
-                for f in table["fields"]
-            )
-            lines.append(f"  Table {table['name']!r}: {field_names}")
+            lines.append(f"  Table {table['name']!r}:")
+            for f in table["fields"]:
+                lines.append(f"    {f['name']} ({f['base_type'].removeprefix('type/')}){_range_hint(f)}")
     return "\n".join(lines)
+
+
+def _range_hint(field: dict) -> str:
+    """One real-data hint per field, appended to its schema line -- the
+    exact number a filter/aggregation choice should be checked against,
+    not a fact left for the model to guess or infer from a plausible-
+    sounding assumption. See module docstring for the live bug this
+    exists to prevent."""
+    fp = (field.get("fingerprint") or {})
+    numeric = fp.get("type", {}).get("type/Number")
+    if numeric:
+        return f" -- real range: {numeric['min']:.2f} to {numeric['max']:.2f}, avg {numeric['avg']:.2f}"
+    datetime_fp = fp.get("type", {}).get("type/DateTime")
+    if datetime_fp:
+        earliest = datetime_fp.get("earliest", "?")[:10]
+        latest = datetime_fp.get("latest", "?")[:10]
+        return f" -- real range: {earliest} to {latest}"
+    return ""

@@ -21,10 +21,18 @@ from console.paths import PROJECTS_DIR, ensure_data_dirs
 
 # Video lifecycle, in order. A video can also land on "render_failed" or
 # "flagged" as a side branch from "rendering" / "qa_pending" respectively.
+# "needs_fix" (added 2026-08-16, CRITICAL fix pass) is a side branch from
+# "generating": the pre-render validation gate (console/validator.py)
+# ran the generated script's declared validations against live Metabase
+# data and they failed even after one feedback-informed regeneration
+# attempt -- render is not offered from this status. Distinct from
+# "generated" specifically so a script that was never actually checked
+# against real data can't look the same as one that was and passed.
 STATUSES = [
     "planned",
     "generating",
     "generated",
+    "needs_fix",
     "rendering",
     "render_failed",
     "rendered",
@@ -51,6 +59,7 @@ class VideoRecord:
     render: dict = field(default_factory=dict)
     qa: dict = field(default_factory=dict)
     notes: Optional[str] = None
+    validation: dict = field(default_factory=dict)
 
 
 @dataclass

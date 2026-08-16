@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, url_for
 
-from console import format_tiers, generator, projects, qa, render_runner, state_chain, trend_source
+from console import format_tiers, generator, projects, qa, render_runner, state_chain, trend_source, validator
 from console.paths import OUTPUT_DIR
 
 app = Flask(__name__)
@@ -69,7 +69,7 @@ textarea { font-family: ui-monospace, monospace; font-size: 13px; line-height: 1
 .status.generated, .status.rendered { background: #123a1a; color: var(--green); }
 .status.qa_pending { background: #123a1a; color: var(--blue); }
 .status.approved { background: #06c015; color: #000; }
-.status.flagged, .status.render_failed { background: #3a1414; color: var(--red); }
+.status.flagged, .status.render_failed, .status.needs_fix { background: #3a1414; color: var(--red); }
 .video-row { display: flex; justify-content: space-between; align-items: center;
              padding: 12px 0; border-bottom: 1px solid var(--border); }
 .video-row:last-child { border-bottom: none; }
@@ -233,11 +233,14 @@ def project_detail(slug):
             f'<a class="btn small" href="/projects/{slug}/videos/{vid}/edit">Generate</a>'
         )
         render_btn = ""
-        if has_script:
+        validation_status = (v.get("validation") or {}).get("status")
+        if has_script and validation_status != "fail":
             render_btn = f"""
             <form method="POST" action="/projects/{slug}/videos/{vid}/render" style="display:inline;">
               <button class="btn small" type="submit">Render</button>
             </form>"""
+        elif has_script:
+            render_btn = '<span class="muted" style="color:var(--red);">Render blocked -- see script review</span>'
         job_link = ""
         if v.get("job_id"):
             job_link = f'<a class="btn secondary small" href="/jobs/{v["job_id"]}">Job</a>'
@@ -327,35 +330,74 @@ def project_state_chain(slug):
     return render_page(content)
 
 
+def _validation_block(video) -> str:
+    v = video.validation or {}
+    status = v.get("status")
+    if status == "pass":
+        return ('<div class="card" style="border-color:var(--green);"><div class="card-title">'
+                'Pre-render validation</div><p style="color:var(--green);">&#10003; Every declared '
+                'query was run against live Metabase data and returned a real, non-empty result. '
+                'Render is allowed.</p></div>')
+    if status == "fail":
+        rows = "".join(
+            f'<div style="color:var(--red); margin-top:6px;">event {c["event_id"]}: {c["detail"]}</div>'
+            for c in v.get("checks", []) if c["status"] != "pass"
+        )
+        return (f'<div class="card" style="border-color:var(--red);"><div class="card-title">'
+                f'Pre-render validation -- BLOCKED</div><p style="color:var(--red);">One or more steps in '
+                f'this script do not produce a real result against live Metabase data right now -- '
+                f'narrating over this would state something false on screen, the exact defect this gate '
+                f'exists to catch. Render is disabled until this is fixed.</p>{rows}</div>')
+    if status == "unchecked":
+        return ('<div class="card" style="border-color:var(--yellow);"><div class="card-title">'
+                'Pre-render validation -- unchecked</div><p style="color:var(--yellow);">This script declared '
+                'no `validations` entries, so nothing was verified against real data. If this video filters '
+                'or aggregates anything, that\'s a gap worth fixing by hand before rendering, not assumed safe.</p></div>')
+    return ""
+
+
 @app.route("/projects/<slug>/videos/<video_id>/edit")
 def edit_video(slug, video_id):
     project = projects.load_project(slug)
-    if project is None or project.video(video_id) is None:
+    video = project.video(video_id) if project else None
+    if project is None or video is None:
         return render_page('<p class="muted">Not found.</p>'), 404
 
     script_path = project.script_path(video_id)
     error = request.args.get("error", "")
     error_block = f'<div class="card" style="border-color:var(--red);"><p style="color:var(--red);">{error}</p></div>' if error else ""
+    validation_block = _validation_block(video)
+
+    # A flagged video's note is the whole point of re-generating -- pre-fill
+    # it here so it demonstrably reaches the prompt rather than depending on
+    # Walter noticing and manually re-typing it (the actual root cause of a
+    # real bug: a flag note was never wired into regeneration at all, so a
+    # regenerated script repeated the exact same mistake it was flagged for).
+    prefill_hint = video.workflow_hint or ""
+    if video.status == "flagged" and video.notes:
+        prefill_hint = video.notes
 
     if script_path.exists():
         script_text = script_path.read_text()
         content = f"""
         {error_block}
+        {validation_block}
         <div class="card">
           <div class="card-title">{video_id} &middot; script</div>
           <form method="POST" action="/projects/{slug}/videos/{video_id}/script">
             <textarea name="script_text" rows="34" spellcheck="false">{script_text}</textarea>
             <div class="row" style="margin-top:14px;">
               <button class="btn" type="submit">Save</button>
-              <span class="muted">Raw lesson_script.yml -- edits are saved as-is, no validation beyond YAML parsing before render.</span>
+              <span class="muted">Raw lesson_script.yml -- saving re-runs the pre-render validation gate automatically.</span>
             </div>
           </form>
         </div>
         <div class="card">
           <div class="card-title">Regenerate</div>
           <form method="POST" action="/projects/{slug}/videos/{video_id}/generate">
-            <label>Workflow guidance (optional)</label>
-            <input type="text" name="workflow_hint" placeholder="e.g. add a second chart to the existing dashboard">
+            <label>Workflow guidance / feedback to address</label>
+            <textarea name="workflow_hint" rows="3" placeholder="e.g. add a second chart to the existing dashboard">{prefill_hint}</textarea>
+            <p class="muted" style="margin-top:6px;">{"Pre-filled from this video's flagged note -- edit or clear it, but whatever's here is what the regeneration will be told to address." if video.status == "flagged" and video.notes else ""}</p>
             <div style="margin-top:12px;">
               <button class="btn secondary" type="submit">Regenerate from scratch</button>
             </div>
@@ -370,8 +412,9 @@ def edit_video(slug, video_id):
           <label>Workflow guidance (optional)</label>
           <input type="text" name="workflow_hint" placeholder="e.g. add a second chart to the existing dashboard">
           <p class="muted" style="margin-top:12px;">Calls the Anthropic API, grounded in LESSON_CONTENT_STANDARD.md, the
-          live Metabase schema, and this project's earlier videos. Produces a draft
-          for review here, not a script that renders automatically.</p>
+          live Metabase schema, and this project's earlier videos, then automatically validates every filter/
+          aggregation it produces against real Metabase data before this page shows it to you -- a script whose
+          declared checks fail gets one automatic corrected retry.</p>
           <div style="margin-top:16px;">
             <button class="btn" type="submit">Generate script</button>
           </div>
@@ -385,15 +428,23 @@ def edit_video(slug, video_id):
 @app.route("/projects/<slug>/videos/<video_id>/generate", methods=["POST"])
 def generate_video_script(slug, video_id):
     project = projects.load_project(slug)
-    if project is None or project.video(video_id) is None:
+    video = project.video(video_id) if project else None
+    if project is None or video is None:
         return render_page('<p class="muted">Not found.</p>'), 404
 
     workflow_hint = request.form.get("workflow_hint", "")
+    # A flagged video's note is real feedback on a real defect -- always
+    # passed to generation regardless of what's in the workflow_hint box,
+    # so it can't silently fail to reach the prompt the way it did before
+    # this fix (a flagged "this filter returns nothing" note produced an
+    # identical broken regeneration, because nothing carried it forward).
+    feedback = video.notes if video.status == "flagged" and video.notes else ""
+
     project.update_video(video_id, status="generating")
     projects.save_project(project)
 
     try:
-        text = generator.generate_lesson_script(project, video_id, workflow_hint)
+        result = generator.generate_lesson_script(project, video_id, workflow_hint, feedback)
     except Exception as exc:
         project.update_video(video_id, status="planned")
         projects.save_project(project)
@@ -401,13 +452,22 @@ def generate_video_script(slug, video_id):
 
     title = None
     try:
-        title = yaml.safe_load(text).get("title")
+        title = yaml.safe_load(result["text"]).get("title")
     except Exception:
         pass
 
-    project.update_video(video_id, status="generated", title=title, workflow_hint=workflow_hint,
+    validation = result["validation"]
+    new_status = "generated" if validation["status"] != "fail" else "needs_fix"
+    project.update_video(video_id, status=new_status, title=title, workflow_hint=workflow_hint,
+                          validation=validation, notes=None,
                           script_relpath=str(project.script_path(video_id).relative_to(project.dir())))
     projects.save_project(project)
+
+    if validation["status"] == "fail":
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id,
+                                 error=f"Generated, but the pre-render validation gate blocked it after "
+                                       f"{result['attempts']} attempt(s) -- see details below. Fix the "
+                                       f"script by hand or regenerate again with different guidance."))
     return redirect(url_for("edit_video", slug=slug, video_id=video_id))
 
 
@@ -423,8 +483,21 @@ def save_video_script(slug, video_id):
     except yaml.YAMLError as exc:
         return redirect(url_for("edit_video", slug=slug, video_id=video_id, error=f"Not valid YAML, not saved: {exc}"))
 
-    project.script_path(video_id).write_text(text)
-    project.update_video(video_id, status="generated", title=(parsed or {}).get("title"))
+    script_path = project.script_path(video_id)
+    script_path.write_text(text)
+
+    # Hand edits get the same pre-render gate generation does -- this is
+    # what actually closes the gap for Problem 3: even if a regeneration's
+    # feedback-handling were imperfect, or a human edits a filter value by
+    # hand and gets it wrong, this check runs regardless, every time a
+    # script's content changes, not just right after generation.
+    try:
+        validation = validator.validate_script(script_path)
+    except Exception as exc:
+        validation = {"passed": False, "status": "unchecked", "checks": [], "error": str(exc)}
+
+    new_status = "generated" if validation["status"] != "fail" else "needs_fix"
+    project.update_video(video_id, status=new_status, title=(parsed or {}).get("title"), validation=validation)
     projects.save_project(project)
     return redirect(url_for("edit_video", slug=slug, video_id=video_id))
 
@@ -434,6 +507,30 @@ def render_video(slug, video_id):
     project = projects.load_project(slug)
     if project is None or project.video(video_id) is None:
         return render_page('<p class="muted">Not found.</p>'), 404
+
+    # Authoritative, re-run fresh right now, not trusted from whatever the
+    # stored video.validation says -- the one thing this project's own
+    # history has repeatedly shown is that a stored "looked fine earlier"
+    # signal (an exit code, a log line, a cached status) isn't the same
+    # claim as "actually true right now." This is the hard gate itself:
+    # a script that fails this is never handed to the render pipeline.
+    script_path = project.script_path(video_id)
+    try:
+        validation = validator.validate_script(script_path)
+    except Exception as exc:
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id,
+                                 error=f"Could not run the pre-render validation gate ({exc}) -- "
+                                       f"not starting a render without it."))
+
+    project.update_video(video_id, validation=validation)
+    projects.save_project(project)
+    if validation["status"] == "fail":
+        project.update_video(video_id, status="needs_fix")
+        projects.save_project(project)
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id,
+                                 error="Render blocked: the pre-render validation gate found one or more "
+                                       "steps that don't produce a real result against live data right now. "
+                                       "See the validation details below."))
 
     try:
         job_id = render_runner.start_render(project, video_id)
