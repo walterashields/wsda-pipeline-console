@@ -188,6 +188,37 @@ type (no highlight, no click) -- it does NOT limit how many real
 highlight/commit action pairs the lesson has in between; those are
 exactly as numerous as the real action sequence from Step A requires.
 
+This rule is NOT only about the very start/end of the script (extended
+2026-08-17 after the scaled test found the same defect recurring mid-
+script): a real generation inserted an extra `narrate` beat BETWEEN a
+highlight_target's own pause and its own commit action (highlight ->
+pause -> narrate -> pause -> commit) -- structurally the identical
+defect, just not at the edges. The actual, general invariant: every
+`highlight_target`/`highlight_targets` event's pause must be followed
+IMMEDIATELY by that same beat's own commit action (click_new_question,
+select_table, add_filter, click_option, save_question,
+add_to_dashboard) -- or by `clear_highlight` for an explanatory-only
+highlight with no click (the same pattern highlight_section uses).
+NOTHING else -- no extra narrate beat, no second highlight -- may sit
+between a highlight's pause and its own resolution. If you find
+yourself wanting to add a sentence there, it belongs IN that beat's own
+narration, not as a new event.
+
+Also, a highlight_target/highlight_targets event must always actually
+GET a resolution: if you draw a highlight, either click something as a
+result (a real commit event, immediately after its pause) or clear it
+as a pure explanation (clear_highlight, immediately after its pause).
+A generated script drew a highlight for "New dashboard" AFTER
+add_to_dashboard had already run and completed its own entire flow
+internally (per that action's own description above -- it handles
+naming/creating/selecting the dashboard by itself, it does not need or
+expect a separate highlight+click for that step) -- an orphaned
+highlight with nothing real to resolve it, narrating a decision that
+was already made and finished a step earlier. Before finalizing, check
+every highlight_target/highlight_targets event has exactly one real
+resolution immediately after its pause, not zero and not a stray extra
+one for a step an action already handles internally.
+
 Work in this ORDER, not narration-first-then-fit-actions-after:
   Step A. Decompose the requested workflow into the smallest real
           sequence of actions available in the vocabulary above that
@@ -562,6 +593,113 @@ def _call_model(system_prompt: str, user_prompt: str) -> str:
     return text.strip() + "\n"
 
 
+COMMIT_TYPES = {"click_new_question", "select_table", "add_filter", "click_option",
+                 "save_question", "add_to_dashboard"}
+
+
+def _highlight_resolution_violations(card_events: list) -> list:
+    """Deterministic structural backstop (added 2026-08-17), same
+    priority and same pattern as _missing_validations_coverage: a prompt
+    instruction alone ("nothing may sit between a highlight's pause and
+    its commit") isn't something to just trust the model on every time,
+    any more than the validations requirement was. automation/
+    metabase_driver.py's own documented behavior establishes ONE
+    invariant every highlight_target/highlight_targets event must
+    satisfy: its own pause is immediately followed by EITHER its
+    matching commit action (COMMIT_TYPES) or clear_highlight (the
+    explanatory-only pattern, same as highlight_section). Both real
+    defects the scaled test found are this SAME invariant broken two
+    different ways, not two separate bugs: (1) an extra narrate+pause
+    beat inserted between a highlight's pause and its own commit (the
+    commit is still there, just displaced), and (2) a highlight with NO
+    commit anywhere after it at all (add_to_dashboard already resolves
+    its own dashboard-naming step internally; a script highlighted
+    "New dashboard" again afterward with nothing left to click). Both
+    silently produce narration describing an action that either fires
+    somewhere other than where it's being described, or never fires --
+    the same class of "not what's actually on screen" defect the data-
+    validation gate exists to catch, just for actions instead of
+    numbers. highlight_section is intentionally excluded: that type is
+    documented as always resolved by clear_highlight, a different,
+    already-correct pattern."""
+    violations = []
+    for i, event in enumerate(card_events):
+        if event.get("type") not in ("highlight_target", "highlight_targets"):
+            continue
+        eid = event.get("id")
+        nxt = card_events[i + 1] if i + 1 < len(card_events) else None
+        if not nxt or nxt.get("type") != "pause":
+            violations.append(f"{eid}: not immediately followed by its own pause")
+            continue
+        nxt2 = card_events[i + 2] if i + 2 < len(card_events) else None
+        found = nxt2.get("type") if nxt2 else "(end of script)"
+        is_valid_resolution = found in COMMIT_TYPES or found == "clear_highlight"
+        if not nxt2 or not is_valid_resolution:
+            violations.append(
+                f"{eid}: its pause is not immediately followed by a matching commit action or "
+                f"clear_highlight (found {found!r} instead) -- either something was inserted "
+                f"between the highlight and its resolution, or this highlight has no resolution at all"
+            )
+    return violations
+
+
+def _filter_fill_event_ids(card_events: list) -> list:
+    """Returns the commit event_ids that submit a typed min/max filter --
+    the one reliable, consistently-used structural marker every real
+    filter step in this project's scripts shares (a highlight event's
+    pre_actions filling placeholders literally named "Min"/"Max",
+    followed by the commit event that submits them). Deliberately
+    narrow, not a claim of total coverage: this does not detect a fresh
+    Summarize/aggregation performed within a video's own events (no
+    fill steps involved there, no comparably reliable marker found yet)
+    -- it closes the specific, real gap that actually shipped (a typed
+    Total-between-X-and-Y filter with no matching validations entry),
+    not every theoretical one."""
+    flagged = []
+    for i, event in enumerate(card_events):
+        pre_actions = event.get("pre_actions") or []
+        has_min_max_fill = any(
+            "fill" in step and step["fill"].get("value") in ("Min", "Max")
+            for step in pre_actions
+        )
+        if not has_min_max_fill:
+            continue
+        # The commit event is NOT the very next event -- every script in
+        # this project follows highlight_target(s) -> pause -> commit
+        # (the pause is what carries the narration audio), confirmed
+        # live: an earlier version of this function assumed i+1 was the
+        # commit and flagged the PAUSE event's id instead every single
+        # time, on real generated output, not a hypothetical. Skip over
+        # pause events (and any clear_highlight) to find the real commit.
+        for j in range(i + 1, len(card_events)):
+            if card_events[j].get("type") not in ("pause", "clear_highlight"):
+                flagged.append(card_events[j].get("id"))
+                break
+    return flagged
+
+
+def _missing_validations_coverage(text: str) -> list:
+    """Deterministic structural backstop (added 2026-08-17), not a second
+    place to hope the model remembers: confirmed live that the prompt's
+    "validations is REQUIRED whenever this video filters" instruction
+    doesn't hold 100% of the time on its own -- root-caused to the
+    proven worked examples (video_1_1, video_1_3) predating the
+    validation-gate fix pass and not having a validations block
+    themselves, directly undermining the instruction once those
+    examples were elevated to "dominant grounding source" (fixed
+    separately, in wsda-video-engine, by adding video_1_1's real
+    validations block -- but this check exists so the pipeline doesn't
+    depend on that alone holding either). Returns event_ids of filter
+    steps with no matching validations entry."""
+    try:
+        card = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return []
+    filter_ids = set(_filter_fill_event_ids(card.get("events", [])))
+    validated_ids = {v.get("event_id") for v in (card.get("validations") or [])}
+    return sorted(filter_ids - validated_ids)
+
+
 def _validation_feedback(result: dict) -> str:
     lines = ["The pre-render validation gate ran your last attempt's declared "
              "validations against LIVE Metabase data and found real problems:"]
@@ -624,6 +762,54 @@ def generate_lesson_script(project, video_id: str, workflow_hint: str = "", feed
                                      f"(parse error: {exc}). Output ONLY the lesson_script.yml "
                                      f"content, no markdown code fences, no commentary before or "
                                      f"after it, starting directly with `lesson_id:`.")
+                continue
+            break
+
+        # Structural backstop for the validations-block requirement,
+        # checked in the same category and same place as the YAML-
+        # validity check above -- deterministic, not relying on the
+        # model remembering an instruction that's demonstrably not 100%
+        # reliable on its own (see _missing_validations_coverage's
+        # docstring). Checked before writing to disk, same as the YAML
+        # check, so an incomplete script is never what a human reviewer
+        # or the fast-path Quick Review page sees without this having
+        # tried to fix it first.
+        missing = _missing_validations_coverage(text)
+        if missing:
+            validation = {"passed": False, "status": "fail", "checks": [],
+                          "error": f"filter step(s) {missing} have no matching validations entry"}
+            if attempt < MAX_GENERATION_ATTEMPTS:
+                current_feedback = (
+                    f"Your last attempt filtered data in event(s) {', '.join(missing)} but declared no "
+                    f"validations entry for it/them. Every filter/aggregation step needs a validations "
+                    f"entry describing that exact query (see the validations SCHEMA) -- add it, using "
+                    f"real per-field ranges from the live schema below, not a placeholder.")
+                continue
+            break
+
+        # Structural backstop for highlight/commit resolution, same
+        # category, priority, and pattern as the validations check right
+        # above -- see _highlight_resolution_violations' docstring. Two
+        # real defects found via the scaled test (a floating narrate
+        # beat displacing a commit; an orphaned highlight with no commit
+        # at all) are both this same invariant broken two ways.
+        highlight_issues = _highlight_resolution_violations(
+            yaml.safe_load(text).get("events", [])
+        )
+        if highlight_issues:
+            validation = {"passed": False, "status": "fail", "checks": [],
+                          "error": f"highlight/commit resolution problems: {highlight_issues}"}
+            if attempt < MAX_GENERATION_ATTEMPTS:
+                current_feedback = (
+                    "Your last attempt has highlight_target/highlight_targets event(s) whose pause "
+                    "isn't immediately followed by their own commit action or clear_highlight:\n  - "
+                    + "\n  - ".join(highlight_issues) +
+                    "\nRemove whatever is displacing the resolution (e.g. an extra narrate beat) or "
+                    "give an orphaned highlight a real commit -- or remove it entirely if the step it "
+                    "was meant to show is already handled internally by a preceding action "
+                    "(e.g. add_to_dashboard resolves its own dashboard-naming step, it needs no "
+                    "separate highlight+click after it)."
+                )
                 continue
             break
 
