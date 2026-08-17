@@ -134,6 +134,61 @@ Locator kinds (`locator: {"kind": ..., "value": ...}` unless noted):
   label            -- aria-label match, for icon-only controls with no
                       visible text (e.g. a pencil/edit icon, "Search").
 
+ATOMIC ACTION DISCIPLINE (added 2026-08-17, real quality gap found by
+comparing generated scripts against the proven examples line by line):
+video_1_1 and video_1_3 above are not just style references, they are
+structural templates for GRANULARITY. Every real generated script
+checked against them showed the same three concrete defects -- fix
+these directly, don't just aim for a vague sense of "tighter":
+
+  1. Narration-only beats with nothing new to look at. A generated
+     script inserted a second scene-setting `narrate` event
+     ("That's a SQL question underneath: which rows match a
+     condition...") floating with no highlight, no action, nothing on
+     screen changing -- pure abstract commentary. video_1_1 and
+     video_1_3 each use exactly ONE opening `narrate` beat (the outcome
+     statement) before the first real action, never two or three
+     fragmented ones. If a sentence doesn't accompany something new and
+     concrete appearing/changing on screen, it doesn't get its own
+     event -- fold it into the adjacent real beat or cut it.
+  2. Redundant restatement. A generated script highlighted the same
+     filter logic twice (once as "why BETWEEN matters", again later as
+     "every row here really does fall in that range") with no new
+     information or action between them -- two events making
+     essentially the same point. Every narrated beat must say something
+     the learner doesn't already know from the beat before it. If two
+     beats would say the same thing, there's only one beat, not two.
+  3. Narration not tightly bound to the one action it accompanies.
+     Compare "Here are the actual matching rows. Total shows each
+     order's amount, User ID shows who placed it." (two columns named,
+     matches highlight_targets highlighting both -- correct, this is
+     what the plural event exists for) against a beat that explains a
+     concept in general terms disconnected from the specific click that
+     follows it. Every highlight/commit pair's narration explains
+     THAT SPECIFIC ACTION -- what's being clicked/typed and why THIS
+     ONE STEP matters -- not a broader lesson wrapped around it.
+
+Work in this ORDER, not narration-first-then-fit-actions-after:
+  Step A. Decompose the requested workflow into the smallest real
+          sequence of actions available in the vocabulary above that
+          accomplishes it -- list them conceptually before writing any
+          narration. One real UI action (one commit event, or one
+          purely-explanatory highlight_section) per step.
+  Step B. For each action, write exactly one short, specific narration
+          line that explains THAT action and nothing else -- the way
+          turn-by-turn directions work: this click, this reason, then
+          the next one. Never combine two steps' worth of explanation
+          into one line, and never add a narration beat that isn't
+          anchored to something concrete on screen.
+  Step C. If the workflow genuinely needs a UI action with no matching
+          entry in the vocabulary above, do not paper over the gap with
+          vague narration or a stretched use of click_option to fake
+          something the driver doesn't actually implement. Say so
+          plainly in the header comment (e.g. "this workflow would
+          benefit from an X action the driver doesn't have yet; used Y
+          instead / scoped the lesson to avoid needing it") so the gap
+          is visible to the human reviewer, not silently hidden.
+
 pre_actions (on highlight_target/highlight_targets only): a list of small
 setup steps run BEFORE the highlight is drawn, so data that doesn't exist
 on screen until some interaction happens (a filter's typed min/max, a
@@ -290,6 +345,20 @@ video pipeline. These are consumed literally by a Playwright driver
 against a real Metabase instance -- your output must be valid,
 runnable YAML matching the exact schema below, not a description or an
 approximation of one.
+
+PRIORITY OF GROUNDING SOURCES, HIGHEST FIRST -- when anything below
+seems to pull in different directions, this order decides it:
+  1. LESSON_CONTENT_STANDARD.md (below) and the proven worked examples
+     (video_1_1, video_1_3, further down) -- Walter's own proven voice,
+     structure, and granularity. This is the dominant source for HOW
+     every beat is written and paced, not one input among several.
+  2. The live Metabase schema (below) -- real data, non-negotiable for
+     any filter/aggregation value, per the validations section.
+  3. General instructional-writing instinct -- only fills gaps the two
+     sources above don't cover (e.g. how to phrase a brand-new UI
+     picker neither example exercises). Never overrides rule 1's
+     granularity/voice, and never a reason to add a beat, a hedge, or a
+     restatement rule 1 wouldn't include.
 
 === CONTENT STANDARD (every rule is a hard requirement) ===
 {standard}
