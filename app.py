@@ -259,17 +259,30 @@ def project_detail(slug):
     for v in project.videos:
         vid = v["video_id"]
         has_script = project.script_path(vid).exists()
-        action_btn = (
-            f'<a class="btn secondary small" href="/projects/{slug}/videos/{vid}/edit">Edit script</a>'
-            if has_script else
-            f'<a class="btn small" href="/projects/{slug}/videos/{vid}/edit">Generate</a>'
-        )
-        render_btn = ""
         validation_status = (v.get("validation") or {}).get("status")
+
+        # Fast path (2026-08-17): a script that passed the validation gate
+        # cleanly gets a "Quick Review" primary action (a short summary +
+        # one-click render, see video_review()) instead of forcing a full
+        # raw-YAML read-through every time. Full edit stays one click away,
+        # optional rather than the default gate. A script that DIDN'T pass
+        # keeps "Edit script" as the only/primary action -- that's exactly
+        # the case human judgment is actually needed for, not skippable.
+        if has_script and validation_status == "pass":
+            action_btn = (
+                f'<a class="btn small" href="/projects/{slug}/videos/{vid}/review">Quick Review</a> '
+                f'<a class="btn secondary small" href="/projects/{slug}/videos/{vid}/edit">Edit script</a>'
+            )
+        elif has_script:
+            action_btn = f'<a class="btn secondary small" href="/projects/{slug}/videos/{vid}/edit">Edit script</a>'
+        else:
+            action_btn = f'<a class="btn small" href="/projects/{slug}/videos/{vid}/edit">Generate</a>'
+
+        render_btn = ""
         if has_script and validation_status != "fail":
             render_btn = f"""
             <form method="POST" action="/projects/{slug}/videos/{vid}/render" style="display:inline;">
-              <button class="btn small" type="submit">Render</button>
+              <button class="btn secondary small" type="submit">Render</button>
             </form>"""
         elif has_script:
             render_btn = '<span class="muted" style="color:var(--red);">Render blocked -- see script review</span>'
@@ -388,6 +401,83 @@ def _validation_block(video) -> str:
     return ""
 
 
+def _narration_summary(script_text: str) -> list:
+    """What this video will actually show and say, in order -- the short
+    summary the fast-path review reads instead of raw YAML (2026-08-17).
+    Pulled directly from the script's own narration fields, not
+    hand-summarized, so it can't drift from what will actually render."""
+    try:
+        card = yaml.safe_load(script_text) or {}
+    except yaml.YAMLError:
+        return []
+    beats = []
+    for e in card.get("events", []):
+        text = (e.get("narration") or "").strip()
+        if text:
+            beats.append({"event_id": e["id"], "type": e["type"], "text": text})
+    return beats
+
+
+@app.route("/projects/<slug>/videos/<video_id>/review")
+def video_review(slug, video_id):
+    project = projects.load_project(slug)
+    video = project.video(video_id) if project else None
+    if project is None or video is None:
+        return render_page('<p class="muted">Not found.</p>'), 404
+
+    script_path = project.script_path(video_id)
+    if not script_path.exists():
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id))
+
+    # This page's whole reason to exist is standing in for a full YAML
+    # read -- only offered when the validation gate actually passed. A
+    # script that needs a human's eyes gets sent to the real editor
+    # instead, not shown a falsely-reassuring summary.
+    if (video.validation or {}).get("status") != "pass":
+        return redirect(url_for("edit_video", slug=slug, video_id=video_id))
+
+    text = script_path.read_text()
+    beats = _narration_summary(text)
+    card = yaml.safe_load(text) or {}
+    tier = format_tiers.get(project.format_tier)
+    order = next(v["order"] for v in project.videos if v["video_id"] == video_id)
+
+    requires_html = ""
+    requires_state = card.get("requires_state") or []
+    if requires_state:
+        names = ", ".join(f'{r["type"]} "{r["name"]}"' for r in requires_state)
+        requires_html = f'<p class="muted" style="margin-top:8px;">Depends on: {names} (seeded automatically before recording)</p>'
+
+    beats_html = "".join(
+        f'<div class="video-row"><div><span class="muted">{b["type"]}</span><div>{b["text"]}</div></div></div>'
+        for b in beats
+    ) or '<p class="muted">No narrated beats found in this script.</p>'
+
+    content = f"""
+    <div class="card" style="border-color:var(--green);">
+      <div class="card-title">Quick Review &middot; {video_id} ({order} of {len(project.videos)})</div>
+      <p style="color:var(--green);">&#10003; Every filter/aggregation this video performs was run against
+      real, live Metabase data and returned a genuine result -- this is the fast path, standing in for a full
+      script read, not a lower bar.</p>
+    </div>
+    <div class="card">
+      <div class="card-title">{card.get('title', video_id)}</div>
+      <p class="muted">{tier.label} &middot; format: {card.get('format', '(default)')}</p>
+      {requires_html}
+    </div>
+    <div class="card">
+      <div class="card-title">What this video shows and says, in order</div>
+      {beats_html}
+    </div>
+    <form method="POST" action="/projects/{slug}/videos/{video_id}/render" style="display:inline;">
+      <button class="btn" type="submit">Looks good &mdash; Render</button>
+    </form>
+    <a class="btn secondary" href="/projects/{slug}/videos/{video_id}/edit">Edit full script instead</a>
+    <a class="btn secondary" href="/projects/{slug}">&larr; {slug}</a>
+    """
+    return render_page(content)
+
+
 @app.route("/projects/<slug>/videos/<video_id>/edit")
 def edit_video(slug, video_id):
     project = projects.load_project(slug)
@@ -500,6 +590,14 @@ def generate_video_script(slug, video_id):
                                  error=f"Generated, but the pre-render validation gate blocked it after "
                                        f"{result['attempts']} attempt(s) -- see details below. Fix the "
                                        f"script by hand or regenerate again with different guidance."))
+    # Fast path (2026-08-17): a script that passed cleanly goes to the
+    # short-summary quick-review page, not straight to a full raw-YAML
+    # read-through -- full editing is still one click away from there,
+    # just not the forced default. A script that needed a fix (status
+    # not "pass" -- unchecked or otherwise) still lands on the full edit
+    # page, since that's exactly the case human judgment is for.
+    if validation["status"] == "pass":
+        return redirect(url_for("video_review", slug=slug, video_id=video_id))
     return redirect(url_for("edit_video", slug=slug, video_id=video_id))
 
 
