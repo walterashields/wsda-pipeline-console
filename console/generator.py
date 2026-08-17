@@ -145,12 +145,13 @@ these directly, don't just aim for a vague sense of "tighter":
      script inserted a second scene-setting `narrate` event
      ("That's a SQL question underneath: which rows match a
      condition...") floating with no highlight, no action, nothing on
-     screen changing -- pure abstract commentary. video_1_1 and
-     video_1_3 each use exactly ONE opening `narrate` beat (the outcome
-     statement) before the first real action, never two or three
-     fragmented ones. If a sentence doesn't accompany something new and
-     concrete appearing/changing on screen, it doesn't get its own
-     event -- fold it into the adjacent real beat or cut it.
+     screen changing -- pure abstract commentary. If a sentence doesn't
+     accompany something new and concrete appearing/changing on screen,
+     it doesn't get its own event -- fold it into the adjacent real
+     beat or cut it. See the HARD RULE below: this defect specifically
+     recurred even after a first attempt at instructing against it, so
+     it now has its own non-negotiable, mechanically-checkable limit,
+     not just guidance to weigh against other considerations.
   2. Redundant restatement. A generated script highlighted the same
      filter logic twice (once as "why BETWEEN matters", again later as
      "every row here really does fall in that range") with no new
@@ -167,6 +168,25 @@ these directly, don't just aim for a vague sense of "tighter":
      follows it. Every highlight/commit pair's narration explains
      THAT SPECIFIC ACTION -- what's being clicked/typed and why THIS
      ONE STEP matters -- not a broader lesson wrapped around it.
+
+HARD RULE, mechanically checkable, not a soft preference (added
+2026-08-17 after a first, softer version of this instruction still let
+a generated script split its opening across two `narrate` events
+despite being told not to -- this version is the fix for that specific
+failure, not a restatement of it): **before finalizing your event list,
+count the `narrate`-type events that appear before the first non-
+narrate event. That count must be exactly 1.** Likewise, count the
+narration-only events at the very end of the script (after the last
+commit action, typically the `show_result` beat) -- that count must
+also be exactly 1. If your draft has 2 or more consecutive narrate
+events at the start or end, that is a failure of this rule, full stop
+-- go back and MERGE them into a single narrate event before writing
+anything else, even if the merged line runs a little longer (it still
+must obey the pause-cap word budget below; trim content rather than
+split it into a second event). This applies ONLY to the pure `narrate`
+type (no highlight, no click) -- it does NOT limit how many real
+highlight/commit action pairs the lesson has in between; those are
+exactly as numerous as the real action sequence from Step A requires.
 
 Work in this ORDER, not narration-first-then-fit-actions-after:
   Step A. Decompose the requested workflow into the smallest real
