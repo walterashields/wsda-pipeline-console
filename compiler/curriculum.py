@@ -548,6 +548,24 @@ def _media_duration(path: str) -> Optional[float]:
         return None
 
 
+class _TeeStream:
+    """Write to multiple streams at once; used to persist run logs."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data: str) -> int:
+        written = 0
+        for stream in self.streams:
+            written = stream.write(data)
+            stream.flush()
+        return written
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
 def _ssim(img1: np.ndarray, img2: np.ndarray) -> float:
     """
     Compute the Structural Similarity Index between two grayscale uint8 images.
@@ -798,203 +816,219 @@ def run_course(
     _cleanup_dir_contents(course_output_dir)
     _cleanup_dir_contents(discovery_output_dir)
 
-    # Resolve video order early so we can ensure each video's seed DB exists.
-    ordered_videos = _video_order(manifest)
-    for video in ordered_videos:
-        db_path_str = video.exercise_artifact.get("db_path")
-        if db_path_str and not Path(db_path_str).exists():
-            from .curriculum_designer import generate_seed_database
+    run_log_path = course_output_dir / "run.log"
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    log_file = open(run_log_path, "w", buffering=1, encoding="utf-8")
+    sys.stdout = _TeeStream(original_stdout, log_file)
+    sys.stderr = _TeeStream(original_stderr, log_file)
 
-            schema = manifest.running_example.get("schema")
-            if schema:
-                generated = generate_seed_database(
-                    manifest.course_id, schema, str(discovery_output_dir)
-                )
-                video.exercise_artifact["db_path"] = str(generated)
-            else:
-                from .discovery import _ensure_sample_db
+    try:
+        # Resolve video order early so we can ensure each video's seed DB exists.
+        ordered_videos = _video_order(manifest)
+        for video in ordered_videos:
+            db_path_str = video.exercise_artifact.get("db_path")
+            if db_path_str and not Path(db_path_str).exists():
+                from .curriculum_designer import generate_seed_database
 
-                video.exercise_artifact["db_path"] = str(_ensure_sample_db(discovery_output_dir))
+                schema = manifest.running_example.get("schema")
+                if schema:
+                    generated = generate_seed_database(
+                        manifest.course_id, schema, str(discovery_output_dir)
+                    )
+                    video.exercise_artifact["db_path"] = str(generated)
+                else:
+                    from .discovery import _ensure_sample_db
 
-    # Determine whether TTS is available.
-    tts_available = bool(
-        os.environ.get("ELEVENLABS_API_KEY", "").strip()
-        and os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
-    )
-    if not tts_available:
-        print(
-            "Note: ElevenLabs credentials not set; producing silent videos + reference scripts.",
-            file=sys.stderr,
+                    video.exercise_artifact["db_path"] = str(_ensure_sample_db(discovery_output_dir))
+
+        # Determine whether TTS is available.
+        tts_available = bool(
+            os.environ.get("ELEVENLABS_API_KEY", "").strip()
+            and os.environ.get("ELEVENLABS_VOICE_ID", "").strip()
         )
-    elif output_mode in ("auto", "hybrid"):
-        # Preflight the credentials once, up front, instead of discovering a
-        # 401 at mux time for every video (which silently degrades to silent
-        # output). A failure here is a warning — rendering continues.
-        try:
-            from .tts import TTSGenerator
-
-            TTSGenerator().check_credentials()
-        except Exception as exc:
+        if not tts_available:
             print(
-                f"Warning: ElevenLabs credential check failed: {exc}\n"
-                "Videos will fall back to silent output unless this is fixed.",
+                "Note: ElevenLabs credentials not set; producing silent videos + reference scripts.",
                 file=sys.stderr,
             )
-
-    graph_store = GraphStore()
-    renderer = GraphRenderer(output_dir=str(course_output_dir))
-    lesson_builder = LessonBuilder()
-
-    video_outputs: List[dict] = []
-    total_duration = 0.0
-
-    for idx, video in enumerate(ordered_videos, start=1):
-        print(f"Video {idx}/{len(ordered_videos)}: {video.title} ... ", end="", flush=True)
-
-        graph_id = f"{manifest.course_id}_{video.video_id}"
-        db_path = video.exercise_artifact.get("db_path")
-
-        # Phase 1b: scout the environment so the script only asserts observed facts.
-        env_map = None
-        if db_path and video.application:
+        elif output_mode in ("auto", "hybrid"):
+            # Preflight the credentials once, up front, instead of discovering a
+            # 401 at mux time for every video (which silently degrades to silent
+            # output). A failure here is a warning — rendering continues.
             try:
-                env_map = scout_environment(
-                    db_path=str(db_path),
-                    application=video.application,
-                    video_id=video.video_id,
-                    output_dir=discovery_output_dir,
-                )
+                from .tts import TTSGenerator
+
+                TTSGenerator().check_credentials()
             except Exception as exc:
-                print(f"Warning: environment scout failed: {exc}", file=sys.stderr)
+                print(
+                    f"Warning: ElevenLabs credential check failed: {exc}\n"
+                    "Videos will fall back to silent output unless this is fixed.",
+                    file=sys.stderr,
+                )
 
-        # Phase 2: generate or load the narration script.
-        if video.script_beats:
-            script_beats = [_dict_to_script_beat(b) for b in video.script_beats]
-            # Normalize legacy recipe/coordinate actions to the vision-agent format.
-            script_beats = lesson_builder._validate_script_beats(script_beats, video)
-        else:
-            script_beats = lesson_builder.generate_script(video, env_map=env_map)
-            video.script_beats = [_script_beat_to_dict(b) for b in script_beats]
+        graph_store = GraphStore()
+        renderer = GraphRenderer(output_dir=str(course_output_dir))
+        lesson_builder = LessonBuilder()
 
-        if not script_beats:
-            print("FAILED (script generation)")
-            raise RuntimeError(f"Script generation failed for {video.video_id}")
+        video_outputs: List[dict] = []
+        total_duration = 0.0
 
-        # Phase 2b: quality gate — only hard failures stop the pipeline.
-        ok, errors, warnings = lesson_builder.validate_script(script_beats, video)
-        for warning in warnings:
-            print(f"  Warning: {warning}", file=sys.stderr)
-        if not ok:
-            print("FAILED (script quality gate)")
-            for err in errors:
-                print(f"  - {err}", file=sys.stderr)
-            raise RuntimeError(f"Script quality gate failed for {video.video_id}")
+        for idx, video in enumerate(ordered_videos, start=1):
+            print(f"Video {idx}/{len(ordered_videos)}: {video.title} ... ", end="", flush=True)
 
-        # Phase 3: execute the script beats via the vision agent and record clips.
-        discovery = EndStateDiscovery(
-            objective=video.discovery_objective,
-            application=video.application,
-            db_path=db_path,
-        )
-        discovery_result = lesson_builder.execute_script(
-            beats=script_beats,
-            discovery=discovery,
-            db_path=db_path,
-        )
+            graph_id = f"{manifest.course_id}_{video.video_id}"
+            db_path = video.exercise_artifact.get("db_path")
 
-        if not discovery_result.success:
-            print("FAILED (script execution did not reach objective)")
-            raise RuntimeError(
-                f"Script execution failed for {video.video_id}: {video.discovery_objective}"
+            # Phase 1b: scout the environment so the script only asserts observed facts.
+            env_map = None
+            if db_path and video.application:
+                try:
+                    env_map = scout_environment(
+                        db_path=str(db_path),
+                        application=video.application,
+                        video_id=video.video_id,
+                        output_dir=discovery_output_dir,
+                    )
+                except Exception as exc:
+                    print(f"Warning: environment scout failed: {exc}", file=sys.stderr)
+
+            # Phase 2: generate or load the narration script.
+            if video.script_beats:
+                script_beats = [_dict_to_script_beat(b) for b in video.script_beats]
+                # Normalize legacy recipe/coordinate actions to the vision-agent format.
+                script_beats = lesson_builder._validate_script_beats(script_beats, video)
+            else:
+                script_beats = lesson_builder.generate_script(video, env_map=env_map)
+                video.script_beats = [_script_beat_to_dict(b) for b in script_beats]
+
+            if not script_beats:
+                print("FAILED (script generation)")
+                raise RuntimeError(f"Script generation failed for {video.video_id}")
+
+            # Phase 2b: quality gate — only hard failures stop the pipeline.
+            ok, errors, warnings = lesson_builder.validate_script(script_beats, video)
+            for warning in warnings:
+                print(f"  Warning: {warning}", file=sys.stderr)
+            if not ok:
+                print("FAILED (script quality gate)")
+                for err in errors:
+                    print(f"  - {err}", file=sys.stderr)
+                raise RuntimeError(f"Script quality gate failed for {video.video_id}")
+
+            # Phase 3: execute the script beats via the vision agent and record clips.
+            discovery = EndStateDiscovery(
+                objective=video.discovery_objective,
+                application=video.application,
+                db_path=db_path,
+            )
+            discovery_result = lesson_builder.execute_script(
+                beats=script_beats,
+                discovery=discovery,
+                db_path=db_path,
             )
 
-        if discovery_result.reliability_score < min_reliability:
-            print(
-                f"FAILED (reliability {discovery_result.reliability_score:.2f} < {min_reliability:.2f})"
+            if not discovery_result.success:
+                print("FAILED (script execution did not reach objective)")
+                raise RuntimeError(
+                    f"Script execution failed for {video.video_id}: {video.discovery_objective}"
+                )
+
+            if discovery_result.reliability_score < min_reliability:
+                print(
+                    f"FAILED (reliability {discovery_result.reliability_score:.2f} < {min_reliability:.2f})"
+                )
+                raise RuntimeError(
+                    f"Discovery reliability too low for {video.video_id}: "
+                    f"{discovery_result.reliability_score:.2f}"
+                )
+
+            # Phase 5: build the ExecutionGraph from script beats and recorded clips.
+            graph = lesson_builder.build_graph(
+                video=video,
+                beats=script_beats,
+                discovery_result=discovery_result,
             )
-            raise RuntimeError(
-                f"Discovery reliability too low for {video.video_id}: "
-                f"{discovery_result.reliability_score:.2f}"
+            graph.graph_id = graph_id
+            graph_store.save(graph)
+
+            # Phase 5b: quality gates before rendering.
+            gate_errors = _run_quality_gates(script_beats, discovery_result, video)
+            if gate_errors:
+                print("FAILED (render quality gates)")
+                for err in gate_errors:
+                    print(f"  - {err}", file=sys.stderr)
+                raise RuntimeError(f"Render quality gates failed for {video.video_id}")
+
+            # Phase 6: Render from the script beats.
+            output_path = str(course_output_dir / f"{graph_id}.mp4")
+            render_result = renderer.render_from_script(
+                video_manifest=video,
+                script_beats=script_beats,
+                output_path=output_path,
+                output_mode=output_mode,
+                graph=graph,
+            )
+            if render_result is None:
+                print("FAILED (render from script)")
+                raise RuntimeError(f"Render from script failed for {video.video_id}")
+
+            # Post-render hard gates: whatever files the renderer claimed to produce
+            # must actually exist on disk.
+            video_path = render_result.get("video_path")
+            if not video_path or not Path(video_path).exists():
+                print("FAILED (rendered video file missing)")
+                raise RuntimeError(f"Rendered video missing for {video.video_id}")
+
+            audio_path = render_result.get("audio_path")
+            if audio_path and not Path(audio_path).exists():
+                print("FAILED (TTS audio file missing)")
+                raise RuntimeError(f"TTS audio missing for {video.video_id}")
+
+            final_path = render_result.get("final_path")
+            if final_path and not Path(final_path).exists():
+                print("FAILED (muxed final MP4 missing)")
+                raise RuntimeError(f"Muxed final MP4 missing for {video.video_id}")
+
+            if not final_path:
+                final_path = video_path
+
+            # Post-render guard: final frame of the silent MP4 should match the
+            # locked end-state screenshot. A mismatch means the renderer did not end
+            # on the discovered objective state.
+            _verify_final_frame_matches_locked_state(video_path, discovery_result)
+
+            duration = render_result.get("duration", 0.0)
+            video_outputs.append(
+                {
+                    "video_id": video.video_id,
+                    "final_path": final_path,
+                    "raw_path": render_result.get("video_path"),
+                    "audio_path": render_result.get("audio_path"),
+                    "reference_path": render_result.get("script_path"),
+                    "duration": round(duration, 3),
+                    "graph_id": graph_id,
+                }
             )
 
-        # Phase 5: build the ExecutionGraph from script beats and recorded clips.
-        graph = lesson_builder.build_graph(
-            video=video,
-            beats=script_beats,
-            discovery_result=discovery_result,
-        )
-        graph.graph_id = graph_id
-        graph_store.save(graph)
+            video.estimated_duration_seconds = int(round(duration))
+            total_duration += duration
 
-        # Phase 5b: quality gates before rendering.
-        gate_errors = _run_quality_gates(script_beats, discovery_result, video)
-        if gate_errors:
-            print("FAILED (render quality gates)")
-            for err in gate_errors:
-                print(f"  - {err}", file=sys.stderr)
-            raise RuntimeError(f"Render quality gates failed for {video.video_id}")
+            print(f"done ({duration:.1f}s)")
 
-        # Phase 6: Render from the script beats.
-        output_path = str(course_output_dir / f"{graph_id}.mp4")
-        render_result = renderer.render_from_script(
-            video_manifest=video,
-            script_beats=script_beats,
-            output_path=output_path,
-            output_mode=output_mode,
-            graph=graph,
-        )
-        if render_result is None:
-            print("FAILED (render from script)")
-            raise RuntimeError(f"Render from script failed for {video.video_id}")
+            # Close the application so the next video starts from a fresh state.
+            _close_application()
 
-        # Post-render hard gates: whatever files the renderer claimed to produce
-        # must actually exist on disk.
-        video_path = render_result.get("video_path")
-        if not video_path or not Path(video_path).exists():
-            print("FAILED (rendered video file missing)")
-            raise RuntimeError(f"Rendered video missing for {video.video_id}")
+            # Save the updated manifest with actual durations.
+        save_manifest(manifest)
 
-        audio_path = render_result.get("audio_path")
-        if audio_path and not Path(audio_path).exists():
-            print("FAILED (TTS audio file missing)")
-            raise RuntimeError(f"TTS audio missing for {video.video_id}")
-
-        final_path = render_result.get("final_path")
-        if final_path and not Path(final_path).exists():
-            print("FAILED (muxed final MP4 missing)")
-            raise RuntimeError(f"Muxed final MP4 missing for {video.video_id}")
-
-        if not final_path:
-            final_path = video_path
-
-        # Post-render guard: final frame of the silent MP4 should match the
-        # locked end-state screenshot. A mismatch means the renderer did not end
-        # on the discovered objective state.
-        _verify_final_frame_matches_locked_state(video_path, discovery_result)
-
-        duration = render_result.get("duration", 0.0)
-        video_outputs.append(
-            {
-                "video_id": video.video_id,
-                "final_path": final_path,
-                "raw_path": render_result.get("video_path"),
-                "audio_path": render_result.get("audio_path"),
-                "reference_path": render_result.get("script_path"),
-                "duration": round(duration, 3),
-                "graph_id": graph_id,
-            }
-        )
-
-        video.estimated_duration_seconds = int(round(duration))
-        total_duration += duration
-
-        print(f"done ({duration:.1f}s)")
-
-        # Close the application so the next video starts from a fresh state.
-        _close_application()
-
-    # Save the updated manifest with actual durations.
-    save_manifest(manifest)
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        try:
+            log_file.close()
+        except Exception:
+            pass
 
     return {
         "course_id": manifest.course_id,

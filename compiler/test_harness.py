@@ -554,6 +554,124 @@ class TestAntiRepetition(unittest.TestCase):
         self.assertEqual(cleaned[3].text, "We opened the table.")
 
 
+class TestClipTruthfulness(unittest.TestCase):
+    """C3: demo beats with material pixel changes are NOT rewritten to state."""
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="wsda_test_truth_"))
+        from compiler.lesson_builder import LessonBuilder
+
+        self.lb = LessonBuilder()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_clip_with_pixel_change_keeps_demo_kind_and_clip(self) -> None:
+        """A sort-like action changes pixels; the beat stays demo and keeps clip."""
+        ref_path = self.tmpdir / "ref.png"
+        clip_path = self.tmpdir / "sort.mp4"
+
+        # Reference frame: grey background with a dark rectangle on the left.
+        ref = np.full((180, 320, 3), 128, dtype=np.uint8)
+        ref[:, :160] = 64
+        from PIL import Image
+        Image.fromarray(ref).save(ref_path)
+
+        # Clip final frame: the dark rectangle has moved to the right.
+        _make_video(clip_path, duration=2.0, fps=10, motion=True)
+
+        changed, ssim, motion_fraction = self.lb._clip_shows_visual_change(
+            str(clip_path), str(ref_path)
+        )
+        self.assertTrue(changed, f"expected pixel change, got SSIM={ssim}, motion={motion_fraction}")
+
+        beat = ScriptBeat(
+            beat_id="beat_sort",
+            kind="demo",
+            text="We click the customer_id header to sort the rows.",
+            action={"type": "click", "detail": "customer_id header"},
+            video_clip_path=str(clip_path.resolve()),
+            observed_state={
+                "active_tab": "Browse Data",
+                "visible_table": "Customers",
+                "row_range_text": "1 - 20 of 20",
+                "column_headers": ["customer_id", "customer_name", "country", "signup_date"],
+                "summary": "Customers table visible.",
+            },
+        )
+        prev_beat = ScriptBeat(
+            beat_id="beat_prev",
+            kind="demo",
+            text="We opened the table.",
+            video_clip_path=str(clip_path.resolve()),
+            observed_state={
+                "active_tab": "Browse Data",
+                "visible_table": "Customers",
+                "row_range_text": "1 - 20 of 20",
+                "column_headers": ["customer_id", "customer_name", "country", "signup_date"],
+                "summary": "Customers table visible.",
+            },
+        )
+        beats = [prev_beat, beat]
+        self.lb._adapt_beats_to_observed_state(beats)
+        self.assertEqual(beat.kind, "demo")
+        self.assertIsNotNone(beat.video_clip_path)
+
+    def test_clip_without_pixel_change_becomes_state(self) -> None:
+        """No visible pixel change lets the beat be rewritten to state."""
+        clip_path = self.tmpdir / "static.mp4"
+        _make_video(clip_path, duration=2.0, fps=10, motion=False)
+
+        ref_path = self.tmpdir / "ref.png"
+        from PIL import Image
+        Image.fromarray(np.full((360, 640, 3), 128, dtype=np.uint8)).save(ref_path)
+
+        changed, ssim, motion_fraction = self.lb._clip_shows_visual_change(
+            str(clip_path), str(ref_path)
+        )
+        self.assertFalse(changed, f"expected no change, got SSIM={ssim}, motion={motion_fraction}")
+
+
+class TestFactDedup(unittest.TestCase):
+    """C3: fact-level dedup detects repeated data."""
+
+    def test_extract_facts_finds_row_counts_and_columns(self) -> None:
+        from compiler.lesson_builder import LessonBuilder
+
+        facts = LessonBuilder._extract_facts(
+            "The Customers table shows 20 rows with columns customer_id, customer_name, country, signup_date."
+        )
+        self.assertIn("20 rows", facts)
+        self.assertIn("columns:country,customer_id,customer_name,signup_date", facts)
+
+    def test_validation_echo_merge_drops_tautology(self) -> None:
+        from compiler.lesson_builder import LessonBuilder
+
+        beats = [
+            ScriptBeat(
+                beat_id="beat_001",
+                kind="explain",
+                text="The Customers grid is loaded with 20 rows and columns customer_id, customer_name, country, signup_date.",
+            ),
+            ScriptBeat(
+                beat_id="beat_002",
+                kind="validation",
+                text="We see the Customers grid with 20 rows and the same columns.",
+            ),
+            ScriptBeat(
+                beat_id="beat_003",
+                kind="validation",
+                text="The status bar shows 6 of 6 after filtering.",
+            ),
+        ]
+        lb = LessonBuilder()
+        merged = lb._merge_validation_echoes(beats)
+        ids = [b.beat_id for b in merged]
+        # beat_002 echoes beat_001 and should be dropped; beat_003 adds new info and stays.
+        self.assertNotIn("beat_002", ids)
+        self.assertIn("beat_003", ids)
+
+
 def _pil_open(path: Path) -> Any:
     from PIL import Image
     return Image.open(str(path))
@@ -569,6 +687,8 @@ def main() -> int:
     suite.addTests(loader.loadTestsFromTestCase(TestRenderFromScript))
     suite.addTests(loader.loadTestsFromTestCase(TestLessonArc))
     suite.addTests(loader.loadTestsFromTestCase(TestAntiRepetition))
+    suite.addTests(loader.loadTestsFromTestCase(TestClipTruthfulness))
+    suite.addTests(loader.loadTestsFromTestCase(TestFactDedup))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     return 0 if result.wasSuccessful() else 1

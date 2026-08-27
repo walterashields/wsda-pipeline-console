@@ -11,7 +11,9 @@ harness, and builds an ExecutionGraph from the resulting recorded clips.
 
 from __future__ import annotations
 
+import cv2
 import json
+import numpy as np
 import os
 import re
 import sqlite3
@@ -19,6 +21,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from PIL import Image
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import anthropic
@@ -63,6 +66,11 @@ class LessonBuilder:
     def __init__(self, content_standard_path: str = "LESSON_CONTENT_STANDARD.md"):
         self.client = anthropic.Anthropic()
         self.lesson_standard = LessonStandard(content_standard_path)
+        style_guide_path = Path(__file__).resolve().parent / "style_guide.md"
+        try:
+            self.style_guide_text = style_guide_path.read_text(encoding="utf-8")
+        except Exception:
+            self.style_guide_text = ""
 
     # ------------------------------------------------------------------
     # Standard ingestion
@@ -1330,7 +1338,10 @@ class LessonBuilder:
                 fix_errors = errors
 
         beats = self._validate_script_beats(beats, video)
+        beats = self._deduplicate_facts(beats)
+        beats = self._merge_validation_echoes(beats)
         beats = self._enforce_word_limits(beats, video)
+        beats = self._enforce_clip_truthfulness(beats)
         ok, errors, warnings = self.validate_script(beats, video)
         for warning in warnings:
             print(f"Warning: {warning}", file=sys.stderr)
@@ -1402,6 +1413,13 @@ class LessonBuilder:
                 f"- Notable UI state: {ui.get('notable', 'none')}\n"
             )
 
+        style_section = ""
+        if self.style_guide_text:
+            style_section = (
+                "\n\nDELIVERY STYLE GUIDE (follow these rules in addition to the rules above):\n"
+                + self.style_guide_text
+            )
+
         return f"""You are writing narration for a short software-training video in the style of SQL Essentials.
 
 Course context
@@ -1439,6 +1457,7 @@ Return ONLY a JSON array of beats. concept/explain beats have NO action. demo be
   {{"beat_id": "beat_009", "kind": "close", "text": "We have opened the Orders table and confirmed its structure. You can now browse any table in the database to see its raw rows and columns before analyzing it.", "action": {{"type": "wait", "duration": 1.5}}}}
 ]
 {fix_section}
+{style_section}
 """
 
     @staticmethod
@@ -1808,6 +1827,7 @@ Return ONLY a JSON array of beats. concept/explain beats have NO action. demo be
 
     def _adapt_beats_to_observed_state(self, beats: List[ScriptBeat]) -> None:
         """Rewrite beats whose claims conflict with observed facts or footage."""
+        previous_reference_path: Optional[str] = None
         previous_observed: Optional[Dict[str, Any]] = None
         for beat in beats:
             if not beat.observed_state:
@@ -1817,7 +1837,23 @@ Return ONLY a JSON array of beats. concept/explain beats have NO action. demo be
                 if self._beat_conflicts_with_observed_state(beat):
                     self._rewrite_beat_from_observed(beat, "state")
             elif beat.kind == "demo":
-                if previous_observed and self._observed_state_unchanged(
+                pixel_changed = False
+                if beat.video_clip_path and Path(beat.video_clip_path).exists():
+                    if previous_reference_path and Path(previous_reference_path).exists():
+                        changed, ssim, motion_fraction = self._clip_shows_visual_change(
+                            beat.video_clip_path, previous_reference_path
+                        )
+                        print(
+                            f"  [adapt] {beat.beat_id}: pixel_change={changed} SSIM={ssim:.4f} motion_fraction={motion_fraction:.4f}",
+                            file=sys.stderr,
+                        )
+                        if changed:
+                            pixel_changed = True
+                    else:
+                        # No reference yet; treat the demo as changing the state.
+                        pixel_changed = True
+
+                if not pixel_changed and previous_observed and self._observed_state_unchanged(
                     previous_observed, beat.observed_state
                 ):
                     self._rewrite_beat_from_observed(
@@ -1829,6 +1865,11 @@ Return ONLY a JSON array of beats. concept/explain beats have NO action. demo be
                         ),
                     )
 
+            # Update the reference image for the next demo beat.
+            if beat.kind == "demo" and beat.video_clip_path and Path(beat.video_clip_path).exists():
+                previous_reference_path = str(
+                    self._extract_last_frame(Path(beat.video_clip_path), Path(f"/tmp/adapt_ref_{beat.beat_id}.png"))
+                )
             previous_observed = beat.observed_state
 
     def _rewrite_beat_from_observed(
@@ -1892,6 +1933,100 @@ Return ONLY a JSON array of beats. concept/explain beats have NO action. demo be
         return True
 
     @staticmethod
+    def _ssim(img1: np.ndarray, img2: np.ndarray) -> float:
+        """Compute SSIM between two grayscale images using an 11x11 Gaussian window."""
+        img1_f = img1.astype(np.float64)
+        img2_f = img2.astype(np.float64)
+        mu1 = cv2.GaussianBlur(img1_f, (11, 11), 1.5)
+        mu2 = cv2.GaussianBlur(img2_f, (11, 11), 1.5)
+        mu1_sq = mu1 * mu1
+        mu2_sq = mu2 * mu2
+        mu1_mu2 = mu1 * mu2
+        sigma1_sq = cv2.GaussianBlur(img1_f * img1_f, (11, 11), 1.5) - mu1_sq
+        sigma2_sq = cv2.GaussianBlur(img2_f * img2_f, (11, 11), 1.5) - mu2_sq
+        sigma12 = cv2.GaussianBlur(img1_f * img2_f, (11, 11), 1.5) - mu1_mu2
+
+        C1 = (0.01 * 255) ** 2
+        C2 = (0.03 * 255) ** 2
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
+            (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+        )
+        return float(ssim_map.mean())
+
+    # Thresholds for the pixels-are-ground-truth demo-adaptation guard.
+    # A sort/reorder produces a high SSIM (~0.95) but distributed small motion,
+    # so the motion detector must catch components smaller than 20x20 (e.g.
+    # reordered row text) while still ignoring single-pixel carets/spinners.
+    _ADAPT_SSIM_THRESHOLD = 0.98
+    _ADAPT_MOTION_MIN_DIM = 10
+    _ADAPT_MOTION_FRACTION_THRESHOLD = 0.01
+
+    def _clip_shows_visual_change(
+        self, clip_path: str, reference_image_path: str
+    ) -> Tuple[bool, float, float]:
+        """Compare the final frame of a clip to a reference image.
+
+        Returns (changed, ssim, motion_fraction). changed is True when the SSIM
+        is below _ADAPT_SSIM_THRESHOLD or the area-aware motion fraction exceeds
+        _ADAPT_MOTION_FRACTION_THRESHOLD.
+        """
+        try:
+            cap = cv2.VideoCapture(str(clip_path))
+            if not cap.isOpened():
+                return False, 1.0, 0.0
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if frame_count > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
+            ret, frame = cap.read()
+            cap.release()
+            if not ret or frame is None:
+                return False, 1.0, 0.0
+
+            clip_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            ref_gray = cv2.imread(str(reference_image_path), cv2.IMREAD_GRAYSCALE)
+            if ref_gray is None:
+                return False, 1.0, 0.0
+
+            target_width = 640
+
+            def _resize_even(img: np.ndarray) -> np.ndarray:
+                h, w = img.shape[:2]
+                scale = target_width / w
+                new_h = int(h * scale)
+                if new_h % 2 == 1:
+                    new_h += 1
+                return cv2.resize(img, (target_width, new_h))
+
+            clip_gray = _resize_even(clip_gray)
+            ref_gray = _resize_even(ref_gray)
+            if clip_gray.shape != ref_gray.shape:
+                ref_gray = cv2.resize(ref_gray, (clip_gray.shape[1], clip_gray.shape[0]))
+
+            ssim = LessonBuilder._ssim(clip_gray, ref_gray)
+
+            diff = cv2.absdiff(clip_gray, ref_gray)
+            _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+            num_labels, _, stats, _ = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+            min_dim = LessonBuilder._ADAPT_MOTION_MIN_DIM
+            min_area = min_dim * min_dim
+            total_pixels = clip_gray.shape[0] * clip_gray.shape[1]
+            motion_pixels = 0
+            for i in range(1, num_labels):
+                area = stats[i, cv2.CC_STAT_AREA]
+                w = stats[i, cv2.CC_STAT_WIDTH]
+                h = stats[i, cv2.CC_STAT_HEIGHT]
+                if area >= min_area and w >= min_dim and h >= min_dim:
+                    motion_pixels += area
+            motion_fraction = motion_pixels / total_pixels if total_pixels else 0.0
+            changed = (ssim < LessonBuilder._ADAPT_SSIM_THRESHOLD) or (
+                motion_fraction > LessonBuilder._ADAPT_MOTION_FRACTION_THRESHOLD
+            )
+            return changed, ssim, motion_fraction
+        except Exception as exc:
+            print(f"Warning: could not compare clip frames: {exc}", file=sys.stderr)
+            return False, 1.0, 0.0
+
+    @staticmethod
     def _beat_conflicts_with_observed_state(beat: ScriptBeat) -> bool:
         """Detect obvious mismatches between beat text and observed state."""
         observed = beat.observed_state
@@ -1934,6 +2069,207 @@ Return ONLY a JSON array of beats. concept/explain beats have NO action. demo be
                 return True
 
         return False
+
+    _FACT_STOP_WORDS = {
+        "the", "same", "these", "those", "all", "its", "their", "our", "this", "that",
+        "above", "below", "listed", "mentioned", "shown", "visible",
+    }
+
+    @staticmethod
+    def _is_column_name(token: str) -> bool:
+        """Return True if token looks like a database column name."""
+        if not token or len(token) <= 2:
+            return False
+        if token in LessonBuilder._FACT_STOP_WORDS:
+            return False
+        # Column names are alphanumeric/underscore; reject plain common words.
+        if not re.match(r"^[a-z_][a-z0-9_]*$", token):
+            return False
+        # Require at least one underscore or be clearly technical (not a common word).
+        if "_" in token:
+            return True
+        # Without underscore, be stricter: avoid very common short words.
+        if token in {
+            "rows", "data", "grid", "table", "name", "date", "type", "code", "id",
+        }:
+            return False
+        return True
+
+    @staticmethod
+    def _extract_facts(text: str) -> set[str]:
+        """Extract checkable facts from narration text.
+
+        We track row counts, status-bar counts, and full column lists.
+        Table-name mentions are intentionally NOT tracked as unique facts
+        because referring to the table repeatedly is normal narration.
+        """
+        facts: set[str] = set()
+        lowered = text.lower()
+        # Row counts and status-bar counts (e.g. "20 rows", "1 - 20 of 20", "6 of 6").
+        for match in re.finditer(r"\d+\s+rows", lowered):
+            facts.add(match.group(0).strip())
+        for match in re.finditer(r"\d+\s*-\s*\d+\s+of\s+\d+", lowered):
+            facts.add(match.group(0).strip())
+        for match in re.finditer(r"\d+\s+of\s+\d+", lowered):
+            facts.add(match.group(0).strip())
+        # Full column lists.
+        col_match = re.search(
+            r"columns?\s+([a-z0-9_,\s]+?)(?:\.|\s+(?:and|are|is|show|visible|named|we|can|without))",
+            lowered,
+        )
+        if col_match:
+            parts = [p.strip() for p in col_match.group(1).split(",")]
+            all_cols: list[str] = []
+            for p in parts:
+                all_cols.extend([x.strip() for x in p.split(" and ")])
+            all_cols = [c for c in all_cols if LessonBuilder._is_column_name(c)]
+            if len(all_cols) >= 2:
+                facts.add(f"columns:{','.join(sorted(all_cols))}")
+        return facts
+
+    def _observed_state_supports_claim(
+        self, beat: ScriptBeat, previous_observed: Optional[Dict[str, Any]]
+    ) -> bool:
+        """Return True if the observed state changed in a way that matches the beat text."""
+        observed = beat.observed_state
+        if not observed or not previous_observed:
+            return False
+        text = beat.text.lower()
+        prev_table = (previous_observed.get("visible_table") or "").lower()
+        curr_table = (observed.get("visible_table") or "").lower()
+        if curr_table and curr_table != prev_table and curr_table in text:
+            return True
+        prev_range = previous_observed.get("row_range_text") or ""
+        curr_range = observed.get("row_range_text") or ""
+        if curr_range and curr_range != prev_range:
+            for num in _extract_numbers(curr_range):
+                if str(num) in beat.text:
+                    return True
+        prev_headers = set(previous_observed.get("column_headers") or [])
+        curr_headers = set(observed.get("column_headers") or [])
+        if curr_headers != prev_headers:
+            for h in curr_headers - prev_headers:
+                if h.lower() in text:
+                    return True
+        return False
+
+    def _enforce_clip_truthfulness(self, beats: List[ScriptBeat]) -> List[ScriptBeat]:
+        """Never narrate a change that is not visible in the clip or observed state."""
+        change_verbs = {
+            "now", "reorder", "reorders", "updates", "shows only", "filtered",
+            "sorted", "selected", "changes", "becomes",
+        }
+        previous_observed: Optional[Dict[str, Any]] = None
+        result: List[ScriptBeat] = []
+        for beat in beats:
+            text = beat.text.lower()
+            has_change_verb = any(verb in text for verb in change_verbs)
+            if not has_change_verb:
+                result.append(beat)
+                previous_observed = beat.observed_state or previous_observed
+                continue
+
+            truthful = False
+            if beat.kind == "demo" and beat.video_clip_path:
+                truthful = True
+            elif beat.observed_state and self._observed_state_supports_claim(
+                beat, previous_observed
+            ):
+                truthful = True
+
+            if truthful:
+                print(f"  [truth] {beat.beat_id}: OK", file=sys.stderr)
+                result.append(beat)
+            else:
+                if beat.kind == "validation":
+                    print(
+                        f"  [truth] {beat.beat_id}: dropped validation echo without observed change",
+                        file=sys.stderr,
+                    )
+                    continue
+                if beat.observed_state:
+                    print(
+                        f"  [truth] {beat.beat_id}: rewriting to stable observed state",
+                        file=sys.stderr,
+                    )
+                    self._rewrite_beat_from_observed(beat, beat.kind)
+                else:
+                    print(
+                        f"  [truth] {beat.beat_id}: no ground truth available, keeping unchanged",
+                        file=sys.stderr,
+                    )
+                result.append(beat)
+            previous_observed = beat.observed_state or previous_observed
+        return result
+
+    def _deduplicate_facts(self, beats: List[ScriptBeat]) -> List[ScriptBeat]:
+        """Rewrite later beats that restate already-asserted facts."""
+        asserted_facts: Dict[str, str] = {}
+        result: List[ScriptBeat] = []
+        for beat in beats:
+            facts = self._extract_facts(beat.text)
+            restated = [f for f in facts if f in asserted_facts]
+            if restated and beat.kind != "demo":
+                already = [asserted_facts[f] for f in restated]
+                prompt = (
+                    "Rewrite this narration beat to reference previously stated facts "
+                    "without restating them. Use phrases like 'the columns we saw earlier' "
+                    "or 'the same rows'. Do not invent new numbers or names. "
+                    "Keep first person plural, present tense, and the original intent.\n\n"
+                    f"Original beat: {beat.text}\n"
+                    f"Already stated facts (first in {already}): {restated}\n"
+                )
+                if beat.observed_state:
+                    observed = beat.observed_state
+                    prompt += (
+                        f"Observed state:\n"
+                        f"- Active tab: {observed.get('active_tab')}\n"
+                        f"- Visible table: {observed.get('visible_table')}\n"
+                        f"- Row range text: {observed.get('row_range_text')}\n"
+                        f"- Column headers: {', '.join(observed.get('column_headers', []) or [])}\n"
+                    )
+                try:
+                    response = self.client.messages.create(
+                        model=MODEL,
+                        max_tokens=256,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    text_parts = [block.text for block in response.content if block.type == "text"]
+                    rewritten = "\n".join(text_parts).strip().strip('"')
+                    if rewritten:
+                        print(
+                            f"  [dedup] {beat.beat_id}: restated {restated} -> '{rewritten[:60]}...'",
+                            file=sys.stderr,
+                        )
+                        beat.text = rewritten
+                except Exception as exc:
+                    print(f"Warning: could not deduplicate {beat.beat_id}: {exc}", file=sys.stderr)
+            for fact in facts:
+                if fact not in asserted_facts:
+                    asserted_facts[fact] = beat.beat_id
+            result.append(beat)
+        return result
+
+    def _merge_validation_echoes(self, beats: List[ScriptBeat]) -> List[ScriptBeat]:
+        """Drop validation beats that merely echo the previous two beats."""
+        result: List[ScriptBeat] = []
+        for i, beat in enumerate(beats):
+            if beat.kind != "validation":
+                result.append(beat)
+                continue
+            current_facts = self._extract_facts(beat.text)
+            previous_facts: set[str] = set()
+            for prev in beats[max(0, i - 2):i]:
+                previous_facts |= self._extract_facts(prev.text)
+            new_facts = current_facts - previous_facts
+            if not new_facts:
+                print(
+                    f"  [merge] {beat.beat_id}: dropped validation echo",
+                    file=sys.stderr,
+                )
+                continue
+            result.append(beat)
+        return result
 
     # ------------------------------------------------------------------
     # Graph construction
