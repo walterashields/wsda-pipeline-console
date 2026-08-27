@@ -1,0 +1,142 @@
+{
+  "course_id": "sql_fundamentals_for_data_analysts",
+  "title": "SQL Fundamentals for Data Analysts",
+  "description": "A hands-on introduction to exploring relational data in DB Browser for SQLite, built around a stable e-commerce Customers and Orders dataset.",
+  "target_audience": "Beginner data analysts with no SQL experience",
+  "videos": [
+    {
+      "video_id": "video_1_1",
+      "title": "Browse the Customers Table",
+      "learning_objective": "Open the Customers table in DB Browser and inspect its rows and columns.",
+      "discovery_objective": "Open the Customers table in the Browse Data tab and display all rows with columns customer_id, customer_name, country, and signup_date visible.",
+      "application": "db_browser_sqlite",
+      "prerequisite_videos": [],
+      "exercise_artifact": {
+        "db_path": "/Users/waltershields/Desktop/wsda-pipeline-console/compiler/discovery_output/sql_fundamentals_for_data_analysts_seed.db",
+        "table_name": "Customers",
+        "description": "Customers table with customer_id, customer_name, country, and signup_date."
+      },
+      "format_tier": "short",
+      "estimated_duration_seconds": 143,
+      "video_type": "demo",
+      "new_capability": null,
+      "key_concept": null,
+      "prerequisite_knowledge": null,
+      "running_example_usage": null,
+      "proof_numbers": null,
+      "estimated_word_count": 0,
+      "has_recap": false,
+      "has_preview": true,
+      "recap_text_hint": null,
+      "preview_text_hint": "Next we will browse the Orders table and see how it relates to Customers.",
+      "key_concepts": [
+        "A database table stores data in rows and columns.",
+        "The Browse Data tab shows table contents without writing SQL.",
+        "Column headers reveal the structure of a table."
+      ],
+      "demo_plan": [
+        {
+          "action_description": "Click the Browse Data tab",
+          "expected_observable_result": "Browse Data tab becomes active and the data grid is visible."
+        },
+        {
+          "action_description": "Select the Customers table from the table dropdown",
+          "expected_observable_result": "Customers table rows and columns appear in the grid."
+        }
+      ],
+      "target_words": 400,
+      "script_beats": [
+        {
+          "beat_id": "beat_001",
+          "kind": "opening",
+          "text": "In this lesson, we will open the Customers table in the Browse Data tab. Seeing the raw rows and columns is the first step before sorting, filtering, or writing any query.",
+          "action": {
+            "type": "wait",
+            "duration": 1.5
+          }
+        },
+        {
+          "beat_id": "beat_002",
+          "kind": "concept",
+          "text": "A database table stores information in rows and columns. Each row in the Customers table is one record, and each column is one attribute. The Customers table has 4 columns (customer_id, customer_name, country, signup_date) and 20 rows. Opening the table in the Browse Data tab lets us inspect this structure without changing anything, which is the safest way to read the data before we sort, filter, or query it. This gives us a clear, inspectable view of the data before any analysis."
+        },
+        {
+          "beat_id": "beat_003",
+          "kind": "demo",
+          "text": "We click the Browse Data tab.",
+          "action": {
+            "type": "click",
+            "detail": "Browse Data tab",
+            "target": {}
+          }
+        },
+        {
+          "beat_id": "beat_004",
+          "kind": "concept",
+          "text": "The Browse Data tab switches the view from the database structure to the data grid. This grid is where we view and interact with table rows visually instead of writing SQL. Once the tab is active, the Customers table can be selected and its 20 rows become visible. Every value remains stored safely in the database. The column headers confirm the structure we are working with. No underlying data is changed by this action."
+        },
+        {
+          "beat_id": "beat_005",
+          "kind": "validation",
+          "text": "We see that the Browse Data tab is active and the Customers table grid is visible, ready to display rows and columns.",
+          "action": {
+            "type": "verify",
+            "detail": "Browse Data tab becomes active and the data grid is visible."
+          }
+        },
+        {
+          "beat_id": "beat_006",
+          "kind": "demo",
+          "text": "We select the Customers table.",
+          "action": {
+            "type": "click",
+            "detail": "Customers table in the table dropdown",
+            "target": {}
+          }
+        },
+        {
+          "beat_id": "beat_007",
+          "kind": "concept",
+          "text": "Selecting the Customers table loads its rows into the grid. The column headers now show customer_id, customer_name, country, signup_date, and every row represents one record. We can inspect the data directly and confirm the structure. This gives us a clear, inspectable view of the data before any analysis. We can repeat this exact action on any table in the database. This stable view lets us verify the result before moving on. Every value remains stored safely in the database."
+        },
+        {
+          "beat_id": "beat_008",
+          "kind": "validation",
+          "text": "We see 20 rows in the Customers table with columns customer_id, customer_name, country, signup_date, confirming the table is open and fully loaded.",
+          "action": {
+            "type": "verify",
+            "detail": "Customers table rows and columns appear in the grid."
+          }
+        },
+        {
+          "beat_id": "beat_009",
+          "kind": "close",
+          "text": "We have opened the Customers table and confirmed its structure. We can now browse any table in the database to see its raw rows and columns before sorting, filtering, or querying.",
+          "action": {
+            "type": "wait",
+            "duration": 1.5
+          }
+        }
+      ]
+    }
+  ],
+  "running_example": {
+    "name": "E-commerce Orders and Customers",
+    "description": "A small online store dataset with a Customers table linked to an Orders table via customer_id.",
+    "schema": {
+      "Customers": {
+        "customer_id": "INTEGER PRIMARY KEY",
+        "customer_name": "TEXT",
+        "country": "TEXT",
+        "signup_date": "TEXT"
+      },
+      "Orders": {
+        "order_id": "INTEGER PRIMARY KEY",
+        "customer_id": "INTEGER",
+        "order_date": "TEXT",
+        "amount": "REAL",
+        "status": "TEXT"
+      }
+    }
+  }
+}

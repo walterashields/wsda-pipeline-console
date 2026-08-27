@@ -167,6 +167,70 @@ def make_synthetic_beats(tmpdir: Path) -> List[ScriptBeat]:
     return beats
 
 
+def make_arc_beats(tmpdir: Path) -> List[ScriptBeat]:
+    """
+    Fabricate a C1 teaching-arc script:
+      opening -> concept -> demo -> concept (explain) -> validation -> close.
+    Only the demo beat has a recorded clip; the rest are state beats.
+    """
+    tmpdir = Path(tmpdir)
+    demo_clip = tmpdir / "arc_demo.mp4"
+    _make_video(demo_clip, duration=2.0, fps=10, motion=True)
+
+    return [
+        ScriptBeat(
+            beat_id="beat_001",
+            kind="opening",
+            text=(
+                "In this lesson, we will browse the Orders table and see its rows and columns. "
+                "This is the first step before sorting, filtering, or writing any query."
+            ),
+            action=None,
+        ),
+        ScriptBeat(
+            beat_id="beat_002",
+            kind="concept",
+            text=(
+                "A database table stores data in rows and columns. Each row in the Orders table "
+                "is one order, and each column is one attribute. Opening the table lets us inspect "
+                "the structure safely without changing anything."
+            ),
+            action=None,
+        ),
+        ScriptBeat(
+            beat_id="beat_003",
+            kind="demo",
+            text="We click the Browse Data tab.",
+            action={"type": "click", "detail": "Browse Data tab"},
+            video_clip_path=str(demo_clip.resolve()),
+        ),
+        ScriptBeat(
+            beat_id="beat_004",
+            kind="concept",
+            text=(
+                "The Browse Data tab switches the view to the data grid. This grid shows rows "
+                "visually instead of using SQL. Once active, the table contents become visible."
+            ),
+            action=None,
+        ),
+        ScriptBeat(
+            beat_id="beat_005",
+            kind="validation",
+            text="We see the Orders table grid with rows and columns visible, confirming the table is loaded.",
+            action={"type": "verify", "detail": "Orders table grid visible"},
+        ),
+        ScriptBeat(
+            beat_id="beat_006",
+            kind="close",
+            text=(
+                "We have opened the Orders table and confirmed its structure. We can now browse "
+                "any table to inspect its raw data before analyzing it."
+            ),
+            action=None,
+        ),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Fake TTS
 # ---------------------------------------------------------------------------
@@ -371,6 +435,79 @@ class TestRenderFromScript(unittest.TestCase):
             restore_tts(original)
 
 
+class TestLessonArc(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="wsda_test_arc_"))
+        self.beats = make_arc_beats(self.tmpdir)
+
+        class Manifest:
+            title = "Arc test"
+            learning_objective = "Test C1 arc rendering."
+            application = "db_browser_sqlite"
+            format_tier = "short"
+
+        self.manifest = Manifest()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_arc_ordering_and_clipless_state_durations(self) -> None:
+        """
+        A C1 arc with clipless state beats must render in order and hold each
+        state frame for its full TTS duration. Total duration equals the sum of
+        the master-timeline beat durations.
+        """
+        renderer = GraphRenderer(output_dir=str(self.tmpdir))
+        tts_durations = {
+            "beat_001": 3.0,
+            "beat_002": 5.0,
+            "beat_003": 2.0,
+            "beat_004": 4.0,
+            "beat_005": 2.5,
+            "beat_006": 3.5,
+        }
+        original = fake_tts(
+            None,  # type: ignore[arg-type]
+            tts_durations,
+        )
+        try:
+            out_path = str(self.tmpdir / "arc_test.mp4")
+            result = renderer.render_from_script(
+                video_manifest=self.manifest,
+                script_beats=self.beats,
+                output_path=out_path,
+                output_mode="auto",
+            )
+            self.assertIsNotNone(result)
+            final_path = Path(result["final_path"])
+            self.assertTrue(final_path.exists())
+
+            final_dur = _media_duration(final_path)
+            expected_dur = sum(tts_durations.values())
+            self.assertAlmostEqual(final_dur, expected_dur, delta=0.3)
+
+            # Verify beat ordering and per-beat durations from the stored graph.
+            from compiler.graph_store import GraphStore
+
+            graph_id = Path(out_path).stem
+            graph = GraphStore().load(graph_id)
+            self.assertIsNotNone(graph)
+            self.assertEqual(
+                [b.beat_id for b in self.beats],
+                [nb.beat_id for nb in graph.narration_beats],
+            )
+
+            for nb in graph.narration_beats:
+                actual = round(nb.end_time - nb.start_time, 3)
+                expected = tts_durations[nb.beat_id]
+                self.assertAlmostEqual(
+                    actual, expected, delta=0.15,
+                    msg=f"{nb.beat_id} duration mismatch: {actual}s vs {expected}s",
+                )
+        finally:
+            restore_tts(original)
+
+
 def _pil_open(path: Path) -> Any:
     from PIL import Image
     return Image.open(str(path))
@@ -384,6 +521,7 @@ def main() -> int:
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TestTrimClipToMotion))
     suite.addTests(loader.loadTestsFromTestCase(TestRenderFromScript))
+    suite.addTests(loader.loadTestsFromTestCase(TestLessonArc))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     return 0 if result.wasSuccessful() else 1

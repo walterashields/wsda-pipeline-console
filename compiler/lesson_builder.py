@@ -144,11 +144,6 @@ class LessonBuilder:
         return " ".join(words[:max_words]).rstrip(",.;:")
 
     @staticmethod
-    def _total_word_limit(format_tier: str) -> int:
-        """Soft upper word limit used for warnings, not hard failures."""
-        return {"micro": 50, "short": 80, "mid": 120, "long": 200, "full": 300}.get(format_tier, 80)
-
-    @staticmethod
     def _db_facts(db_path: Optional[str], table_name: str) -> Dict[str, Any]:
         """Return row count and column list for a table."""
         facts = {"row_count": 0, "columns": []}
@@ -260,6 +255,23 @@ class LessonBuilder:
             print(f"Warning: could not find table for column {column}: {exc}", file=sys.stderr)
         return None
 
+    @staticmethod
+    def _pick_substitute_column(target_column: Optional[str], table: str, columns: List[str]) -> Optional[str]:
+        """Choose a real column to substitute for an ungrounded target_column.
+
+        Prefers categorical/text-sounding columns, then falls back to the first
+        column. Returns the canonical-cased column name from the schema.
+        """
+        if not columns:
+            return None
+        lowered_cols = {c.lower(): c for c in columns}
+        if target_column and target_column.lower() in lowered_cols:
+            return lowered_cols[target_column.lower()]
+        for pattern in ("status", "region", "country", "name", "type", "category", "state", "city", "role"):
+            if pattern in lowered_cols:
+                return lowered_cols[pattern]
+        return columns[0]
+
     def _parse_objective(self, objective: str, db_path: Optional[str] = None, default_table: str = "Orders") -> Optional[Dict[str, Any]]:
         """Map a discovery objective to a recipe type and parameters."""
         lowered = objective.lower()
@@ -285,6 +297,20 @@ class LessonBuilder:
                 "direction": direction,
             }
 
+        # Sort via column-header click: "Click the X column header in the Y table ..."
+        header_sort_match = re.search(
+            r"(?:click|clicking)\s+(?:the\s+)?(\w+)\s+(?:column\s+)?header\s+(?:in\s+(?:the\s+)?)?(\w+)",
+            lowered,
+        )
+        if header_sort_match:
+            direction = "desc" if any(w in lowered for w in ("descending", "desc", "largest", "biggest", "highest", "second time", "again")) else "asc"
+            return {
+                "type": "sort_column",
+                "table": header_sort_match.group(2).capitalize(),
+                "column": header_sort_match.group(1).capitalize(),
+                "direction": direction,
+            }
+
         # Filter with explicit value: filter X by typing Y into the Z column filter box
         filter_value_match = re.search(
             r"filter\s+(?:the\s+)?(\w+)\s+(?:table\s+)?(?:by\s+(?:typing|entering)\s+)['\"]?(.+?)['\"]?\s+(?:into|in)\s+(?:the\s+)?(\w+)\s+(?:column\s+)?filter",
@@ -296,6 +322,20 @@ class LessonBuilder:
                 "type": "filter_column",
                 "table": filter_value_match.group(1).capitalize(),
                 "column": filter_value_match.group(3).capitalize(),
+                "value": value,
+            }
+
+        # Filter via type-into-filter-box: "Type X into the Y filter box under the Z table"
+        filter_box_match = re.search(
+            r"(?:type|enter)\s+['\"]?(.+?)['\"]?\s+(?:into|in)\s+(?:the\s+)?(\w+)\s+(?:column\s+)?filter\s+(?:box\s+)?(?:under|in)\s+(?:the\s+)?(\w+)",
+            lowered,
+        )
+        if filter_box_match:
+            value = filter_box_match.group(1).strip().strip("'\"")
+            return {
+                "type": "filter_column",
+                "table": filter_box_match.group(3).capitalize(),
+                "column": filter_box_match.group(2).capitalize(),
                 "value": value,
             }
 
@@ -433,8 +473,110 @@ class LessonBuilder:
         return {"type": "verify", "detail": detail}
 
     @staticmethod
-    def _sequence_action(actions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        return {"type": "sequence", "actions": actions}
+    def _sequence_action(actions: List[Dict[str, Any]], logical_unit: bool = False) -> Dict[str, Any]:
+        action: Dict[str, Any] = {"type": "sequence", "actions": actions}
+        if logical_unit:
+            # A logical_unit sequence represents one conceptual demo interaction
+            # (e.g. "open the Orders table" or "type a value and press Return").
+            # It is kept as a single demo beat in the C1 arc.
+            action["logical_unit"] = True
+        return action
+
+    # ------------------------------------------------------------------
+    # C1: full teaching-arc text helpers (grounded in EnvironmentMap)
+    # ------------------------------------------------------------------
+
+    def _generate_hook(self, video: Any, table: str, column: Optional[str]) -> str:
+        """Return an opening beat (30-45 words) stating the lesson + payoff."""
+        title = getattr(video, "title", "")
+        objective = video.learning_objective or getattr(video, "discovery_objective", "")
+        lowered = objective.lower()
+        if "sort" in lowered:
+            return (
+                f"In this lesson, we will sort the {table} table by {column}. "
+                f"This lets us find the largest and smallest values instantly, "
+                f"which is one of the fastest ways to read a numeric column."
+            )
+        if "filter" in lowered:
+            return (
+                f"In this lesson, we will filter the {table} table to focus on one group. "
+                f"Filtering helps us answer questions about a subset of rows without deleting anything."
+            )
+        if "query" in lowered or "select" in lowered:
+            return (
+                f"In this lesson, we will run a SELECT query in the Execute SQL tab. "
+                f"Writing a query lets us ask precise questions and get exact answers from the database."
+            )
+        return (
+            f"In this lesson, we will open the {table} table in the Browse Data tab. "
+            f"Seeing the raw rows and columns is the first step before sorting, filtering, or writing any query."
+        )
+
+    def _generate_concept(
+        self,
+        video: Any,
+        table: str,
+        columns: List[str],
+        row_count: int,
+        rows_word: str,
+    ) -> str:
+        """Return a concept beat (50-90 words) explaining the core idea."""
+        objective = video.learning_objective or getattr(video, "discovery_objective", "")
+        lowered = objective.lower()
+        cols_text = ", ".join(columns) if columns else "the columns"
+        if "sort" in lowered:
+            return (
+                f"Sorting rearranges the rows in a table without changing the stored data. "
+                f"When we sort the {table} table, every row stays complete, but the order changes so the "
+                f"smallest or largest value appears first. This is different from filtering, which hides rows. "
+                f"In the {table} table, the {columns[-1] if columns else 'last'} column controls the order, "
+                f"and the grid shows all {row_count} {rows_word} once the sort is applied."
+            )
+        if "filter" in lowered:
+            return (
+                f"A filter reduces the visible rows so we can focus on one group. "
+                f"Unlike sorting, filtering does not reorder the data; it hides rows that do not match. "
+                f"The {table} table contains {row_count} {rows_word}, and a filter will show only the ones that match our value. "
+                f"This is reversible: clearing the filter brings every row back into view."
+            )
+        if "query" in lowered or "select" in lowered:
+            return (
+                f"A SELECT query is a precise question we ask the database. "
+                f"We name the columns we want and the table they come from, and the database returns only those rows. "
+                f"The {table} table stores {row_count} {rows_word} with columns {cols_text}. "
+                f"Writing the query in the Execute SQL tab gives us an exact, repeatable answer every time."
+            )
+        return (
+            f"A database table stores information in rows and columns. "
+            f"Each row in the {table} table is one record, and each column is one attribute. "
+            f"The {table} table has {len(columns)} columns ({cols_text}) and {row_count} {rows_word}. "
+            f"Opening the table in the Browse Data tab lets us inspect this structure without changing anything, "
+            f"which is the safest way to read the data before we sort, filter, or query it."
+        )
+
+    def _generate_recap(self, video: Any, table: str, column: Optional[str]) -> str:
+        """Return a close/recap beat (30-45 words)."""
+        objective = video.learning_objective or getattr(video, "discovery_objective", "")
+        lowered = objective.lower()
+        if "sort" in lowered:
+            return (
+                f"We have sorted the {table} table by {column} and observed how the rows reorder. "
+                f"We can now use column-header sorting to find the top and bottom values in any numeric column."
+            )
+        if "filter" in lowered:
+            return (
+                f"We have filtered the {table} table to show only matching rows. "
+                f"We can now use the filter box under any column to focus on the subset we need."
+            )
+        if "query" in lowered or "select" in lowered:
+            return (
+                f"We have run a SELECT query against the {table} table and viewed the results. "
+                f"We can now write our own queries to ask precise questions of any table."
+            )
+        return (
+            f"We have opened the {table} table and confirmed its structure. "
+            f"We can now browse any table in the database to see its raw rows and columns before sorting, filtering, or querying."
+        )
 
     @staticmethod
     def _parse_demo_to_action(text: str) -> List[Dict[str, Any]]:
@@ -587,30 +729,229 @@ class LessonBuilder:
         # Already in vision-agent format.
         return action_spec
 
+    # ------------------------------------------------------------------
+    # C1: demo-unit helpers
+    # ------------------------------------------------------------------
+
+    def _demo_action_from_description(
+        self,
+        description: str,
+        table: str,
+        column: Optional[str],
+        direction: str,
+        filter_value: str,
+        query: str,
+        browse_data_already_active: bool,
+        target_table_already_open: bool,
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """
+        Convert a demo-plan action_description into narration text and a
+        vision-agent action dict. Returns (text, action); text may be empty
+        if the step is redundant given the observed UI state.
+        """
+        lowered = description.lower()
+
+        # Logical-unit demos: one conceptual interaction that may need several
+        # physical steps. They stay as a single demo beat in the C1 arc.
+        if "open" in lowered and table.lower() in lowered:
+            actions: List[Dict[str, Any]] = []
+            texts: List[str] = []
+            if not browse_data_already_active:
+                actions.append(self._click_action("Browse Data tab"))
+                texts.append("We click the Browse Data tab")
+            if not target_table_already_open:
+                actions.append(self._click_action(f"{table} table in the table dropdown"))
+                texts.append(f"and select the {table} table")
+            if not actions:
+                return f"The {table} table is already open.", self._wait_action()
+            if len(actions) == 1:
+                return " ".join(texts).strip() + ".", actions[0]
+            seq = self._sequence_action(actions, logical_unit=True)
+            return " ".join(texts).strip() + ".", seq
+
+        if "browse data" in lowered or "browse data tab" in lowered:
+            if browse_data_already_active:
+                return "", None
+            return "We click the Browse Data tab.", self._click_action("Browse Data tab")
+
+        if "select" in lowered and table.lower() in lowered and "dropdown" in lowered:
+            if target_table_already_open:
+                return "", None
+            return f"We select the {table} table.", self._click_action(f"{table} table in the table dropdown")
+
+        if "column header" in lowered and column:
+            if "twice" in lowered or "second time" in lowered or "again" in lowered:
+                return f"We click the {column} column header again.", self._click_action(f"{column} column header")
+            return f"We click the {column} column header.", self._click_action(f"{column} column header")
+
+        if "filter box" in lowered and column:
+            return f"We click the {column} filter box.", self._click_action(f"{column} filter box")
+
+        if ("type" in lowered or "enter" in lowered) and filter_value and column:
+            return (
+                f"We type {filter_value} and press Return.",
+                self._sequence_action([
+                    self._type_action(str(filter_value), target=f"{column} filter box"),
+                    self._key_action("Return"),
+                ], logical_unit=True),
+            )
+
+        if "return" in lowered or "press return" in lowered:
+            return "We press Return.", self._key_action("Return")
+
+        if "execute sql" in lowered or "sql" in lowered:
+            return (
+                "We open Execute SQL, type the query, and run it.",
+                self._sequence_action([
+                    self._click_action("Execute SQL tab"),
+                    self._click_action("SQL editor text area"),
+                    self._type_action(query, target="SQL editor text area"),
+                    self._key_action("F5"),
+                ]),
+            )
+
+        # Generic fallback.
+        return f"We {description.lower()}.", self._wait_action()
+
+    def _generate_explain(
+        self,
+        description: str,
+        table: str,
+        column: Optional[str],
+        direction: str,
+        filter_value: str,
+        columns: List[str],
+        row_count: int,
+        rows_word: str,
+    ) -> str:
+        """Return an explain beat (40-70 words) over the settled result state."""
+        lowered = description.lower()
+        cols_text = ", ".join(columns) if columns else "the columns"
+        direction_text = "ascending" if direction == "asc" else "descending"
+
+        if "browse data" in lowered:
+            return (
+                f"The Browse Data tab switches the view from the database structure to the data grid. "
+                f"This grid is where we view and interact with table rows visually instead of writing SQL. "
+                f"Once the tab is active, the {table} table can be selected and its {row_count} {rows_word} become visible."
+            )
+
+        if "select" in lowered and table.lower() in lowered:
+            return (
+                f"Selecting the {table} table loads its rows into the grid. "
+                f"The column headers now show {cols_text}, and every row represents one record. "
+                f"We can inspect the data directly and confirm the structure."
+            )
+
+        if "column header" in lowered and column:
+            return (
+                f"Clicking the {column} header sorts the {table} table in {direction_text} order. "
+                f"The rows reorder instantly, but no data is deleted or changed. "
+                f"This makes the largest or smallest value easy to locate at a glance."
+            )
+
+        if "filter box" in lowered and column:
+            return (
+                f"Clicking the {column} filter box prepares the input where we will type the value. "
+                f"The cursor is now in the filter field, ready to restrict which {rows_word} of the {table} table remain visible."
+            )
+
+        if ("type" in lowered or "enter" in lowered or "filter" in lowered) and filter_value and column:
+            return (
+                f"Typing {filter_value} and pressing Return applies the filter. "
+                f"The grid now hides rows that do not match, so only the relevant subset of the {table} table remains. "
+                f"The row count updates to reflect the filtered results, and the underlying data stays unchanged."
+            )
+
+        if "execute sql" in lowered or "sql" in lowered or "query" in lowered:
+            return (
+                f"The query asks the database for specific rows and columns from the {table} table. "
+                f"After pressing F5, the results grid shows the answer. "
+                f"This exact, repeatable result is why SQL is powerful for data analysis."
+            )
+
+        return (
+            f"This action changes what we see on screen while leaving the stored data intact. "
+            f"The {table} table still contains {row_count} {rows_word}, but the view now matches our goal."
+        )
+
+    def _generate_validation(
+        self,
+        description: str,
+        table: str,
+        column: Optional[str],
+        direction: str,
+        filter_value: str,
+        columns: List[str],
+        row_count: int,
+        rows_word: str,
+    ) -> str:
+        """Return a validation beat (20-40 words) citing observable facts."""
+        lowered = description.lower()
+        cols_text = ", ".join(columns) if columns else "the columns"
+        direction_text = "ascending" if direction == "asc" else "descending"
+
+        if "browse data" in lowered:
+            return (
+                f"We see that the Browse Data tab is active and the {table} table grid is visible, "
+                f"ready to display rows and columns."
+            )
+
+        if "select" in lowered and table.lower() in lowered:
+            return (
+                f"We see {row_count} {rows_word} in the {table} table with columns {cols_text}, "
+                f"confirming the table is open and fully loaded."
+            )
+
+        if "column header" in lowered and column:
+            return (
+                f"We see the {table} table sorted by {column} in {direction_text} order across {row_count} {rows_word}, "
+                f"with the extreme value now at the top."
+            )
+
+        if "filter" in lowered and filter_value and column:
+            # Actual filtered count will be observed during execution; use a neutral phrasing.
+            return (
+                f"We see the {table} table filtered to rows where {column} equals {filter_value}, "
+                f"and the updated row count is visible in the status area."
+            )
+
+        if "execute sql" in lowered or "query" in lowered:
+            return (
+                f"We see the Execute SQL tab showing a populated results grid for the {table} table, "
+                f"with the requested rows and columns returned."
+            )
+
+        return (
+            f"We see the {table} table displaying the expected result with {row_count} {rows_word} "
+            f"and columns {cols_text}."
+        )
+
     def _build_script_beats(
         self,
         video: Any,
         parsed: Dict[str, Any],
         env_map: Optional[Dict[str, Any]] = None,
     ) -> List[ScriptBeat]:
-        """Build SQL Essentials-quality beats from a parsed objective.
+        """Build a full SQL Essentials-style teaching arc from a parsed objective.
 
-        Each non-wait beat gets a vision-agent action dict in ``beat.action`` so
-        the discovery harness can drive the UI dynamically instead of using
-        hard-coded coordinate recipes.
+        Arc: hook -> concept -> [demo -> explain -> validate]* -> recap.
+        All numbers and names come from the EnvironmentMap or direct DB facts.
         """
         exercise = video.exercise_artifact or {}
         db_path = exercise.get("db_path")
-        table = parsed.get("table", "Orders")
+        table = parsed.get("table", exercise.get("table_name", "Orders"))
+        column = parsed.get("column")
+        direction = parsed.get("direction", "asc")
+        filter_value = parsed.get("value", "")
+        query = parsed.get("query", "SELECT * FROM Orders")
+
         facts = self._db_facts(db_path, table)
         row_count = facts.get("row_count", 0)
         columns = facts.get("columns", [])
-        columns_text = ", ".join(columns) if columns else "the columns"
-        tier = getattr(video, "format_tier", "short")
-        compact = tier in {"micro"}
 
-        # Ground against the scout pass if available.
-        env_tables = []
+        # Ground against the scout pass when available.
+        env_tables: List[str] = []
         env_columns: Dict[str, List[str]] = {}
         env_row_counts: Dict[str, int] = {}
         env_default_table: Optional[str] = None
@@ -622,444 +963,264 @@ class LessonBuilder:
             ui = env_map.get("ui") or {}
             env_default_table = ui.get("browse_data_default_table")
             env_active_tab = ui.get("active_tab")
-            # Prefer observed facts over raw DB facts when they conflict.
             if table in env_row_counts:
                 row_count = env_row_counts[table]
             if table in env_columns:
                 columns = env_columns[table]
-                columns_text = ", ".join(columns)
 
         rows_word = "rows" if row_count != 1 else "row"
         browse_data_already_active = env_active_tab and "browse data" in env_active_tab.lower()
         target_table_already_open = env_default_table and env_default_table.lower() == table.lower()
 
-        def _validation(text: str) -> str:
-            """Ensure validation beats are 10-15 words and end with a period."""
-            text = text.strip().rstrip(".")
-            wc = len(text.split())
-            pads = [
-                ", confirming the result is correct",
-                ", which confirms the operation succeeded",
-                ", verifying the outcome matches our goal",
+        # Ground the parsed column against the actual table schema.
+        # Provisional demo_plan/objectives may reference columns that do not
+        # exist (e.g. "Region" on a table that only has "status"). Substitute a
+        # real column so filter/sort demos are retained and narration stays
+        # grounded.
+        if column and columns:
+            canonical = {c.lower(): c for c in columns}
+            if column.lower() not in canonical:
+                substitute = self._pick_substitute_column(column, table, columns)
+                if substitute:
+                    print(
+                        f"Info: substituting missing column '{column}' with '{substitute}' in {video.video_id}",
+                        file=sys.stderr,
+                    )
+                    column = substitute
+            else:
+                column = canonical[column.lower()]
+            # Refresh any filter value from the actual substituted column.
+            if parsed.get("type") == "filter_column":
+                filter_value = self._first_value(
+                    db_path, table, column, context=f"filter {video.video_id}"
+                ) or ""
+
+        # Reconcile demo_plan against the EnvironmentMap.
+        demo_plan = list(getattr(video, "demo_plan", []) or [])
+        reconciled_demos: List[Dict[str, Any]] = []
+        env_tables_lower = {t.lower() for t in env_tables}
+        columns_lower = {c.lower() for c in columns}
+        for demo in demo_plan:
+            desc = demo.get("action_description", "")
+            lowered = desc.lower()
+            grounded = True
+            # Drop demos that reference tables not present in the environment.
+            for t in env_tables:
+                if t.lower() in lowered and t.lower() not in env_tables_lower:
+                    grounded = False
+                    break
+            # Drop demos that reference columns not present in the target table.
+            if grounded and column and column.lower() in lowered:
+                if column.lower() not in columns_lower:
+                    grounded = False
+            if not grounded:
+                print(
+                    f"Warning: dropping ungrounded demo from {video.video_id}: {desc}",
+                    file=sys.stderr,
+                )
+                continue
+            reconciled_demos.append(demo)
+
+        # Fallback if the manifest demo_plan is empty or all demos were dropped.
+        if not reconciled_demos:
+            reconciled_demos = [
+                {
+                    "action_description": video.discovery_objective,
+                    "expected_observable_result": video.discovery_objective,
+                }
             ]
-            while wc < 10:
-                text = text + pads[(wc // 3) % len(pads)]
-                wc = len(text.split())
-            if wc > 15:
-                text = " ".join(text.split()[:15]).rstrip(",;:")
-            return text + "."
 
         beats: List[ScriptBeat] = []
 
-        if parsed["type"] == "browse_table":
-            if compact:
-                demo_actions: List[Dict[str, Any]] = []
-                demo_texts: List[str] = []
-                if not browse_data_already_active:
-                    demo_actions.append(self._click_action("Browse Data tab"))
-                    demo_texts.append("We click Browse Data")
-                if not target_table_already_open:
-                    demo_actions.append(self._click_action(f"{table} table in the table dropdown"))
-                    demo_texts.append(f"and open the {table} table")
-                if not demo_actions:
-                    demo_actions = [self._wait_action()]
-                    demo_texts.append(f"The {table} table is already open")
-                demo_action = (
-                    self._sequence_action(demo_actions)
-                    if len(demo_actions) > 1
-                    else demo_actions[0]
-                )
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text=f"In this video, we will open the {table} table.",
-                        action=self._wait_action(),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text=" ".join(demo_texts).strip() + ".",
-                        action=demo_action,
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="validation",
-                        text=_validation(
-                            f"We see {len(columns)} columns and {row_count} {rows_word} in the grid"
-                        ),
-                        action=self._verify_action(
-                            f"the {table} table is visible with its rows and columns"
-                        ),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="close",
-                        text=f"We have opened the {table} table and confirmed its structure.",
-                        action=self._wait_action(),
-                    ),
-                ]
-            else:
-                demo_actions = []
-                demo_texts = []
-                if not browse_data_already_active:
-                    demo_actions.append(self._click_action("Browse Data tab"))
-                    demo_texts.append("We click the Browse Data tab")
-                if not target_table_already_open:
-                    demo_actions.append(self._click_action(f"{table} table in the table dropdown"))
-                    if demo_texts:
-                        demo_texts.append(f"and select {table}")
-                    else:
-                        demo_texts.append(f"We select {table}")
-                if not demo_actions:
-                    demo_actions = [self._wait_action()]
-                    demo_texts.append(f"The {table} table is already open")
-                demo_action = (
-                    self._sequence_action(demo_actions)
-                    if len(demo_actions) > 1
-                    else demo_actions[0]
-                )
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text=f"In this video, we will open the {table} table in the Browse Data tab.",
-                        action=self._wait_action(),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text=" ".join(demo_texts).strip() + ".",
-                        action=demo_action,
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="validation",
-                        text=_validation(
-                            f"We see {len(columns)} columns in the grid: {columns_text}"
-                        ),
-                        action=self._verify_action(
-                            f"the {table} table is visible with columns {columns_text}"
-                        ),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="close",
-                        text=f"We have opened the {table} table and confirmed its structure.",
-                        action=self._wait_action(),
-                    ),
-                ]
-
-        elif parsed["type"] == "sort_column":
-            column = parsed.get("column", "amount")
-            direction = parsed.get("direction", "asc")
-            direction_text = "ascending" if direction == "asc" else "descending"
-            top_value = self._top_value(db_path, table, column, direction) or "the first value"
-            if compact:
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text=f"In this video, we will sort by {column} in {direction_text} order.",
-                        action=self._wait_action(),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text=f"We open the {table} table and click the {column} header.",
-                        action=self._sequence_action([
-                            self._click_action("Browse Data tab"),
-                            self._click_action(f"{table} table in the table dropdown"),
-                            self._click_action(f"{column} column header"),
-                        ]),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="validation",
-                        text=_validation(
-                            f"We see the {direction_text} sort with {top_value} at the top"
-                        ),
-                        action=self._verify_action(
-                            f"the {table} rows are sorted by {column} in {direction_text} order"
-                        ),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="close",
-                        text=f"We have sorted the {table} table by {column} in {direction_text} order.",
-                        action=self._wait_action(),
-                    ),
-                ]
-            else:
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text=f"In this video, we will sort the {table} table by {column} in {direction_text} order.",
-                        action=self._wait_action(),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text=f"We open the {table} table and the rows appear.",
-                        action=self._sequence_action([
-                            self._click_action("Browse Data tab"),
-                            self._click_action(f"{table} table in the table dropdown"),
-                        ]),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="demo",
-                        text=f"We click the {column} column header and the rows reorder.",
-                        action=self._click_action(f"{column} column header"),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="validation",
-                        text=_validation(
-                            f"We see the {direction_text} sort, with {top_value} at the top"
-                        ),
-                        action=self._verify_action(
-                            f"the {table} rows are sorted by {column} in {direction_text} order"
-                        ),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_005",
-                        kind="close",
-                        text=f"We have sorted the {table} table by {column} in {direction_text} order.",
-                        action=self._wait_action(),
-                    ),
-                ]
-
-        elif parsed["type"] == "filter_column":
-            column = parsed.get("column", "region")
-            value = parsed.get("value", "")
-            filtered_count = self._filtered_count(db_path, table, column, value) if value else 0
-            filtered_word = "rows" if filtered_count != 1 else "row"
-            if compact:
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text=f"In this video, we will filter the {table} by {column}.",
-                        action=self._wait_action(),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text=f"We click the filter box, type {value}, and press Return.",
-                        action=self._sequence_action([
-                            self._click_action("Browse Data tab"),
-                            self._click_action(f"{table} table in the table dropdown"),
-                            self._click_action(f"{column} filter box"),
-                            self._type_action(str(value), target=f"{column} filter box"),
-                            self._key_action("Return"),
-                        ]),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="validation",
-                        text=_validation(
-                            f"We see exactly {filtered_count} {filtered_word} where {column} equals {value}"
-                        ),
-                        action=self._verify_action(
-                            f"only {filtered_count} {filtered_word} with {column} equal to {value} are visible"
-                        ),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="close",
-                        text=f"We have filtered the {table} by {column} and isolated rows.",
-                        action=self._wait_action(),
-                    ),
-                ]
-            else:
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text=f"In this video, we will filter the {table} table to show only {value} rows.",
-                        action=self._wait_action(),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text=f"We open the {table} table and the rows appear.",
-                        action=self._sequence_action([
-                            self._click_action("Browse Data tab"),
-                            self._click_action(f"{table} table in the table dropdown"),
-                        ]),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="demo",
-                        text=f"We click the {column} filter box and type {value}.",
-                        action=self._click_action(f"{column} filter box"),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="demo",
-                        text="We press Return and the rows filter.",
-                        action=self._type_action(str(value), target=f"{column} filter box"),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_005",
-                        kind="validation",
-                        text=_validation(
-                            f"We see {filtered_count} {filtered_word}, all with {column} equal to {value}"
-                        ),
-                        action=self._verify_action(
-                            f"only {filtered_count} {filtered_word} with {column} equal to {value} are visible"
-                        ),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_006",
-                        kind="close",
-                        text=f"We have filtered the {table} table by {column} and narrowed the view.",
-                        action=self._wait_action(),
-                    ),
-                ]
-
-            # Compact the filter short version: the type action needs a Return keypress.
-            if not compact:
-                # Replace the Return press with a key action after the type beat.
-                # Current beat_004 is type; add an explicit Return key beat.
-                beats.insert(
-                    5,
-                    ScriptBeat(
-                        beat_id="beat_005_key",
-                        kind="demo",
-                        text="We press Return and the rows filter.",
-                        action=self._key_action("Return"),
-                    ),
-                )
-                # Renumber beats.
-                for i, beat in enumerate(beats, start=1):
-                    beat.beat_id = f"beat_{i:03d}"
-
-        elif parsed["type"] == "execute_query":
-            query = parsed.get("query", "SELECT * FROM Orders")
-            spoken_query = self._verbalize_sql(query)
-            spoken_words = spoken_query.split()
-            short_type_text = (
-                f"We type {spoken_query} and the SQL appears."
-                if len(spoken_words) <= 6
-                else "We type the formatted query and the SQL appears."
+        # Hook (opening)
+        beats.append(
+            ScriptBeat(
+                beat_id="beat_001",
+                kind="opening",
+                text=self._generate_hook(video, table, column),
+                action=self._wait_action(),
             )
-            if compact:
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text="In this video, we will run our first SELECT query.",
-                        action=self._wait_action(),
+        )
+
+        # Concept (no action, spoken over initial stable state)
+        beats.append(
+            ScriptBeat(
+                beat_id="beat_002",
+                kind="concept",
+                text=self._generate_concept(video, table, columns, row_count, rows_word),
+                action=None,
+            )
+        )
+
+        # Demo units.
+        demo_idx = 3
+        for demo in reconciled_demos:
+            demo_text, demo_action = self._demo_action_from_description(
+                demo.get("action_description", ""),
+                table,
+                column,
+                direction,
+                filter_value,
+                query,
+                browse_data_already_active,
+                target_table_already_open,
+            )
+            if not demo_text or not demo_action:
+                continue
+            beats.append(
+                ScriptBeat(
+                    beat_id=f"beat_{demo_idx:03d}",
+                    kind="demo",
+                    text=demo_text,
+                    action=demo_action,
+                )
+            )
+            demo_idx += 1
+
+            # Explain (concept/state beat over the settled result state)
+            beats.append(
+                ScriptBeat(
+                    beat_id=f"beat_{demo_idx:03d}",
+                    kind="concept",
+                    text=self._generate_explain(
+                        demo.get("action_description", ""),
+                        table,
+                        column,
+                        direction,
+                        filter_value,
+                        columns,
+                        row_count,
+                        rows_word,
                     ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text="We open Execute SQL, type the query, and run it.",
-                        action=self._sequence_action([
-                            self._click_action("Execute SQL tab"),
-                            self._click_action("SQL editor text area"),
-                            self._type_action(query, target="SQL editor text area"),
-                            self._key_action("F5"),
-                        ]),
+                    action=None,
+                )
+            )
+            demo_idx += 1
+
+            # Validate
+            beats.append(
+                ScriptBeat(
+                    beat_id=f"beat_{demo_idx:03d}",
+                    kind="validation",
+                    text=self._generate_validation(
+                        demo.get("action_description", ""),
+                        table,
+                        column,
+                        direction,
+                        filter_value,
+                        columns,
+                        row_count,
+                        rows_word,
                     ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="validation",
-                        text=_validation(
-                            f"We see the results grid populate with the returned {rows_word}"
-                        ),
-                        action=self._verify_action(
-                            "the Execute SQL tab shows a populated results grid below the query"
-                        ),
+                    action=self._verify_action(
+                        demo.get(
+                            "expected_observable_result",
+                            f"the {table} table shows the expected result",
+                        )
                     ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="close",
-                        text=f"We have run the query and retrieved the {row_count} {rows_word}.",
-                        action=self._wait_action(),
-                    ),
-                ]
-            else:
-                beats = [
-                    ScriptBeat(
-                        beat_id="beat_001",
-                        kind="opening",
-                        text="In this video, we will run a SELECT query in the Execute SQL tab.",
-                        action=self._wait_action(),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_002",
-                        kind="demo",
-                        text="We click the Execute SQL tab and the editor appears.",
-                        action=self._click_action("Execute SQL tab"),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_003",
-                        kind="demo",
-                        text="We click the SQL editor and type the formatted query.",
-                        action=self._sequence_action([
-                            self._click_action("SQL editor text area"),
-                            self._type_action(query, target="SQL editor text area"),
-                        ]),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_004",
-                        kind="demo",
-                        text="We press F5 and the results grid populates.",
-                        action=self._key_action("F5"),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_005",
-                        kind="validation",
-                        text=_validation(
-                            f"We see {row_count} {rows_word} returned, confirming the query executed successfully"
-                        ),
-                        action=self._verify_action(
-                            "the Execute SQL tab shows a populated results grid below the query"
-                        ),
-                    ),
-                    ScriptBeat(
-                        beat_id="beat_006",
-                        kind="close",
-                        text=f"We have run our SELECT query and retrieved all {row_count} {rows_word}.",
-                        action=self._wait_action(),
-                    ),
-                ]
+                )
+            )
+            demo_idx += 1
+
+        # Recap (close)
+        beats.append(
+            ScriptBeat(
+                beat_id=f"beat_{demo_idx:03d}",
+                kind="close",
+                text=self._generate_recap(video, table, column),
+                action=self._wait_action(),
+            )
+        )
+
+        # Renumber sequentially.
+        for i, beat in enumerate(beats, start=1):
+            beat.beat_id = f"beat_{i:03d}"
 
         return beats
 
     def _enforce_word_limits(
         self, beats: List[ScriptBeat], video: Any
     ) -> List[ScriptBeat]:
-        """Trim beats to per-kind word limits and total script limit without
-        breaking action+result demo sentences."""
-        limits = {"opening": 15, "demo": 12, "validation": 15, "close": 15}
-        minima = {"opening": 10, "demo": 5, "validation": 10, "close": 10}
-        total_limit = self._total_word_limit(getattr(video, "format_tier", "short"))
+        """Enforce the C1 word budget: 350-650 total, with per-kind ranges."""
+        target = max(350, min(650, getattr(video, "target_words", 450)))
+        limits = {
+            "opening": (30, 45),
+            "concept": (50, 90),
+            "demo": (5, 20),
+            "validation": (20, 40),
+            "close": (30, 45),
+            "state": (20, 90),
+            "recap": (30, 45),
+            "preview": (10, 30),
+        }
 
-        # First pass: hard cap per kind.
+        # First pass: hard cap each beat to its maximum.
         for beat in beats:
-            beat.text = self._truncate(beat.text, limits.get(beat.kind, 15))
+            lo, hi = limits.get(beat.kind, (5, 90))
+            beat.text = self._truncate(beat.text, hi)
 
-        # Second pass: if total still exceeds limit, trim non-essential words
-        # from the longest beat, but never below its minimum and never remove
-        # the 'and' that joins action + result in demo beats.
-        while sum(self._word_count(b.text) for b in beats) > total_limit and len(beats) > 3:
-            longest = max(beats[1:-1], key=lambda b: self._word_count(b.text))
+        # Second pass: if over budget, trim longest non-demo beats.
+        total = sum(self._word_count(b.text) for b in beats)
+        while total > target + 50 and len(beats) > 3:
+            longest = max(
+                [b for b in beats[1:-1] if b.kind != "demo"],
+                key=lambda b: self._word_count(b.text),
+                default=None,
+            )
+            if longest is None:
+                break
             words = longest.text.split()
-            minimum = minima.get(longest.kind, 5)
-            if len(words) <= minimum:
+            lo, _ = limits.get(longest.kind, (5, 90))
+            if len(words) <= lo:
                 break
-            # For demo beats, do not drop the word 'and' or the last word.
-            if longest.kind == "demo" and " and " in longest.text and len(words) > minimum + 1:
-                longest.text = " ".join(words[:-1]).rstrip(",.;:")
-            elif longest.kind == "demo":
+            longest.text = " ".join(words[:-1]).rstrip(",.;:")
+            total = sum(self._word_count(b.text) for b in beats)
+
+        # Third pass: if under budget, pad beats up to their minimum first, then
+        # distribute remaining budget across concept/explain beats.
+        pad_sentences = [
+            " This gives us a clear, inspectable view of the data before any analysis.",
+            " Every value remains stored safely in the database.",
+            " We can repeat this exact action on any table in the database.",
+            " The column headers confirm the structure we are working with.",
+            " This stable view lets us verify the result before moving on.",
+            " No underlying data is changed by this action.",
+        ]
+        pad_idx = 0
+        while total < target - 50:
+            # Prioritize beats that are below their per-kind minimum.
+            under_min = [
+                b for b in beats
+                if b.kind in limits
+                and self._word_count(b.text) < limits[b.kind][0]
+                and self._word_count(b.text) < limits[b.kind][1]
+            ]
+            candidates = under_min or [
+                b for b in beats
+                if b.kind in {"concept", "state"}
+                and self._word_count(b.text) < limits.get(b.kind, (5, 90))[1]
+            ]
+            if not candidates:
                 break
-            else:
-                longest.text = " ".join(words[:-1]).rstrip(",.;:")
+            beat = min(candidates, key=lambda b: self._word_count(b.text))
+            # Ensure a clean sentence boundary before appending the padding sentence.
+            beat.text = beat.text.rstrip(". ") + "." + pad_sentences[pad_idx % len(pad_sentences)]
+            # Make sure padding does not push the beat above its per-kind maximum.
+            lo, hi = limits.get(beat.kind, (5, 90))
+            beat.text = self._truncate(beat.text, hi)
+            pad_idx += 1
+            total = sum(self._word_count(b.text) for b in beats)
+            if pad_idx > 40:
+                break
+
+        # Log final word counts per kind.
+        by_kind: Dict[str, int] = {}
+        for beat in beats:
+            by_kind[beat.kind] = by_kind.get(beat.kind, 0) + self._word_count(beat.text)
+        print(
+            f"Script word budget: total={total}, target={target}, by_kind={by_kind}",
+            file=sys.stderr,
+        )
 
         return beats
 
@@ -1209,32 +1370,31 @@ Course context
 - Running example: {table_name} table in {db_path}
 {env_section}
 STRICT RULES (zero exceptions):
-1. Exactly 4-6 beats total.
-2. Beat kinds (in order): opening, demo (2-4 beats), validation, close.
-3. NO concept beat. NO abstract theory. NO explanation of why the skill matters.
-4. Voice: first person plural, present tense. "We click...", "We type...", "We see..."
-5. NEVER use: you'll, you need to, it's important to, before you, if you skip, understand, learn, concept, abstract.
-6. Demo beats must combine action + immediate result in one sentence:
-   GOOD: "We click the Browse Data tab and the table view opens."
-   BAD: "Click the Browse Data tab." (robotic command)
-   BAD: "The table view opens." (no action)
-7. Every demo beat = exactly ONE atomic action with narration <= 20 words, written to be spoken WHILE the action happens.
-8. Do NOT generate actions already satisfied by the observed default state:
-   - If Browse Data is the active tab, do not narrate clicking it.
-   - If the target table is already shown in Browse Data, do not narrate selecting it.
-9. Validation beats must reference facts in the EnvironmentMap verbatim (exact table names, column names, and row counts).
-10. Only state numbers/names present in the EnvironmentMap. Never invent quantities, table names, or column names.
-11. Close beat: "We have [skill]."
-12. Word limits: opening 10-15, demo 5-20, validation 10-15, close 10-15. Total ≤70 words for a short video.
+1. Follow this exact arc: opening -> concept -> (demo -> concept -> validation)* -> close.
+2. opening (hook): 30-45 words. State what this lesson teaches and one concrete payoff.
+3. concept: 50-90 words, no action. Explain the core idea over a stable screen state.
+4. demo: 5-20 words, exactly ONE atomic action, spoken WHILE the action happens. Start with "We ".
+5. concept (explain): 40-70 words, no action. Explain the "why/what this means" over the SETTLED RESULT of the previous demo.
+6. validation: 20-40 words. Cite only observable facts from the EnvironmentMap (exact table names, column names, row counts).
+7. close (recap): 30-45 words. Summarize what we did and what the learner can do now.
+8. Total script: 350-650 words (≈2-4.5 minutes at 2.5 words per second).
+9. Voice: first person plural, present tense. "We click...", "We type...", "We see..."
+10. NEVER use: you'll, you need to, it's important to, before you, if you skip, understand, learn, abstract.
+11. Do NOT generate actions already satisfied by the observed default state.
+12. Only state numbers/names present in the EnvironmentMap. Never invent quantities, table names, or column names.
 13. SQL keywords in narration stay uppercase: SELECT, FROM, WHERE. Use "star" for *.
 
-Return ONLY a JSON array of beats like:
+Return ONLY a JSON array of beats. concept/explain beats have NO action. demo beats MUST have an action.
 [
-  {{"beat_id": "beat_001", "kind": "opening", "text": "In this video, we will open the Orders table.", "action": {{"type": "browse_table", "table": "Orders"}}}},
-  {{"beat_id": "beat_002", "kind": "demo", "text": "We click the Browse Data tab and the table view opens."}},
-  {{"beat_id": "beat_003", "kind": "demo", "text": "We select Orders from the dropdown and the rows appear."}},
-  {{"beat_id": "beat_004", "kind": "validation", "text": "We see all rows and columns in the Orders table."}},
-  {{"beat_id": "beat_005", "kind": "close", "text": "We have opened the Orders table and confirmed its structure."}}
+  {{"beat_id": "beat_001", "kind": "opening", "text": "In this lesson, we will open the Orders table in DB Browser for SQLite. Seeing the raw rows and columns is the first step before sorting, filtering, or writing any query.", "action": {{"type": "wait", "duration": 1.5}}}},
+  {{"beat_id": "beat_002", "kind": "concept", "text": "A database table stores information in rows and columns. Each row in the Orders table is one record, and each column is one attribute. The Orders table has columns id, region, order_date, and amount, with several rows of data. Opening the table in the Browse Data tab lets us inspect this structure without changing anything, which is the safest way to understand the data."}},
+  {{"beat_id": "beat_003", "kind": "demo", "text": "We click the Browse Data tab.", "action": {{"type": "click", "detail": "Browse Data tab"}}}},
+  {{"beat_id": "beat_004", "kind": "concept", "text": "The Browse Data tab switches the view from the database structure to the data grid. This grid is where we view and interact with table rows visually instead of writing SQL. Once the tab is active, the Orders table can be selected and its rows become visible."}},
+  {{"beat_id": "beat_005", "kind": "validation", "text": "The Browse Data tab is active and the data grid area is visible, ready to show table rows."}},
+  {{"beat_id": "beat_006", "kind": "demo", "text": "We select the Orders table.", "action": {{"type": "click", "detail": "Orders table in the table dropdown"}}}},
+  {{"beat_id": "beat_007", "kind": "concept", "text": "Selecting the Orders table loads its rows into the grid. The column headers now show id, region, order_date, and amount, and every row represents one order. We can now inspect the data directly and confirm the table structure before moving on."}},
+  {{"beat_id": "beat_008", "kind": "validation", "text": "The grid shows the Orders table with all rows and columns id, region, order_date, and amount visible."}},
+  {{"beat_id": "beat_009", "kind": "close", "text": "We have opened the Orders table and confirmed its structure. You can now browse any table in the database to see its raw rows and columns before analyzing it.", "action": {{"type": "wait", "duration": 1.5}}}}
 ]
 {fix_section}
 """
@@ -1281,6 +1441,13 @@ Return ONLY a JSON array of beats like:
 
             sub_actions = LessonBuilder._atomic_sub_actions(beat.action)
             if len(sub_actions) <= 1:
+                result.append(beat)
+                continue
+            # C1 arc: logical demo units (open table, type+Return, etc.) stay as
+            # one conceptual demo beat even though they contain multiple physical
+            # steps. Splitting them would create consecutive demo beats and break
+            # the demo -> concept -> validation pattern.
+            if beat.action.get("logical_unit"):
                 result.append(beat)
                 continue
 
@@ -1350,11 +1517,10 @@ Return ONLY a JSON array of beats like:
         self, beats: List[ScriptBeat], video: Any
     ) -> tuple[bool, List[str], List[str]]:
         """
-        SQL Essentials quality gate. Returns (ok, hard_errors, warnings).
+        C1 quality gate. Returns (ok, hard_errors, warnings).
 
-        Only empty text, missing required beat kinds, and a complete lack of demo
-        beats are treated as hard failures. Everything else is a warning so the
-        pipeline can use the best-effort script instead of looping forever.
+        Hard failures: empty script, missing required kinds, no demo beats, or
+        beats that severely violate the teaching arc.
         """
         errors: List[str] = []
         warnings: List[str] = []
@@ -1364,24 +1530,34 @@ Return ONLY a JSON array of beats like:
             return False, errors, warnings
 
         kinds = [b.kind for b in beats]
-        required = {"opening", "demo", "validation", "close"}
+        required = {"opening", "concept", "demo", "validation", "close"}
         missing = required - set(kinds)
         if missing:
             errors.append(f"Missing required beat kinds: {sorted(missing)}")
 
-        if "concept" in kinds:
-            warnings.append("Concept beats are not preferred; consider replacing with demo/validation.")
+        # Arc ordering: opening -> concept -> (demo -> concept -> validation)* -> close
+        progression_ok = True
+        if kinds[0] != "opening":
+            progression_ok = False
+            warnings.append("Script should start with an opening beat.")
+        if len(kinds) > 1 and kinds[1] != "concept":
+            progression_ok = False
+            warnings.append("The second beat should be a concept beat.")
+        if kinds[-1] != "close":
+            progression_ok = False
+            warnings.append("Script should end with a close/recap beat.")
 
-        # Structure ordering warnings.
-        try:
-            first_demo = kinds.index("demo")
-        except ValueError:
-            first_demo = len(kinds)
-        if "validation" in kinds and "close" in kinds:
-            if kinds.index("validation") > kinds.index("close"):
-                warnings.append("Validation beat should come before the close beat.")
-        if "opening" in kinds and first_demo < kinds.index("opening"):
-            warnings.append("Opening should come before demo beats.")
+        # Validate the repeating demo -> concept -> validation units.
+        middle = kinds[2:-1]
+        unit_pattern = re.compile(r"^(demo concept validation)( demo concept validation)*$")
+        if middle and not unit_pattern.match(" ".join(middle)):
+            progression_ok = False
+            warnings.append(
+                "Middle beats must follow repeating demo -> concept -> validation units."
+            )
+
+        if not progression_ok:
+            warnings.append("Expected arc: opening -> concept -> (demo -> concept -> validation)* -> close.")
 
         demo_count = sum(1 for b in beats if b.kind == "demo")
         action_count = sum(1 for b in beats if b.kind == "demo" and b.action)
@@ -1390,17 +1566,28 @@ Return ONLY a JSON array of beats like:
         if action_count == 0:
             warnings.append("Demo beats lack concrete actions; discovery may not reach the objective.")
 
-        # Total length (soft limit → warning).
-        total_limit = self._total_word_limit(getattr(video, "format_tier", "short"))
+        # Total word budget.
+        target = max(350, min(650, getattr(video, "target_words", 450)))
         total_words = sum(self._word_count(b.text) for b in beats)
-        if total_words > total_limit:
-            warnings.append(f"Script is {total_words} words, exceeds soft limit of {total_limit}.")
+        if not (350 <= total_words <= 650):
+            warnings.append(f"Script is {total_words} words; expected 350-650 (target={target}).")
+        elif total_words > target + 50:
+            warnings.append(f"Script is {total_words} words; exceeds target {target} by >50.")
 
-        # Per-kind soft word limits.
-        limits = {"opening": (8, 25), "demo": (3, 20), "validation": (8, 25), "close": (8, 20)}
+        # Per-kind word ranges (C1).
+        limits = {
+            "opening": (30, 45),
+            "concept": (50, 90),
+            "demo": (5, 20),
+            "validation": (20, 40),
+            "close": (30, 45),
+            "state": (20, 90),
+            "recap": (30, 45),
+            "preview": (10, 30),
+        }
         for beat in beats:
             wc = self._word_count(beat.text)
-            lo, hi = limits.get(beat.kind, (3, 25))
+            lo, hi = limits.get(beat.kind, (5, 90))
             if not (lo <= wc <= hi):
                 warnings.append(f"{beat.beat_id} ({beat.kind}) has {wc} words; expected {lo}-{hi}.")
 
@@ -1417,7 +1604,7 @@ Return ONLY a JSON array of beats like:
                 warnings.append(f"{beat.beat_id} should start with 'We '.")
 
             if beat.kind == "opening" and not re.search(
-                r"^(in this video,\s+)?(we\s+will|this\s+video\s+shows|we\s+are\s+going)", lowered
+                r"^(in this lesson,\s+)?(we\s+will|this\s+lesson\s+shows|we\s+are\s+going)", lowered
             ):
                 warnings.append(f"{beat.beat_id} opening should state the objective clearly.")
 

@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -62,6 +62,10 @@ class VideoManifest(BaseModel):
     has_preview: bool = False
     recap_text_hint: Optional[str] = None
     preview_text_hint: Optional[str] = None
+    # C1: structured lesson metadata for arc generation and word budgeting.
+    key_concepts: List[str] = Field(default_factory=list)
+    demo_plan: List[Dict[str, Any]] = Field(default_factory=list)
+    target_words: int = 450
     # Serialized script beats (Path A lesson-first architecture).
     script_beats: List[dict] = Field(default_factory=list)
 
@@ -204,6 +208,177 @@ def create_sql_sorting_fundamentals() -> CourseManifest:
                 "region": "TEXT",
                 "order_date": "TEXT",
                 "amount": "REAL",
+            },
+        },
+    )
+
+
+def create_sql_fundamentals_for_data_analysts() -> CourseManifest:
+    """
+    A 5-video SQL Essentials-style course using a small e-commerce dataset.
+    Each video is one self-contained lesson with a real teaching arc.
+    """
+    db_path = str(
+        (Path(__file__).resolve().parent / "discovery_output" / "sql_fundamentals_for_data_analysts_seed.db").resolve()
+    )
+
+    customers_exercise = {
+        "db_path": db_path,
+        "table_name": "Customers",
+        "description": "Customers table with customer_id, customer_name, country, and signup_date.",
+    }
+    orders_exercise = {
+        "db_path": db_path,
+        "table_name": "Orders",
+        "description": "Orders table with order_id, customer_id, order_date, amount, and status.",
+    }
+
+    videos = [
+        VideoManifest(
+            video_id="video_1_1",
+            title="Browse the Customers Table",
+            learning_objective="Open the Customers table in DB Browser and inspect its rows and columns.",
+            discovery_objective="Open the Customers table in the Browse Data tab and display all rows with columns customer_id, customer_name, country, and signup_date visible.",
+            application="db_browser_sqlite",
+            prerequisite_videos=[],
+            exercise_artifact=customers_exercise,
+            format_tier="short",
+            key_concepts=[
+                "A database table stores data in rows and columns.",
+                "The Browse Data tab shows table contents without writing SQL.",
+                "Column headers reveal the structure of a table.",
+            ],
+            demo_plan=[
+                {"action_description": "Click the Browse Data tab", "expected_observable_result": "Browse Data tab becomes active and the data grid is visible."},
+                {"action_description": "Select the Customers table from the table dropdown", "expected_observable_result": "Customers table rows and columns appear in the grid."},
+            ],
+            target_words=400,
+            has_preview=True,
+            preview_text_hint="Next we will browse the Orders table and see how it relates to Customers.",
+        ),
+        VideoManifest(
+            video_id="video_1_2",
+            title="Browse the Orders Table",
+            learning_objective="Open the Orders table and relate its columns to the Customers table.",
+            discovery_objective="Open the Orders table in the Browse Data tab and display all rows with columns order_id, customer_id, order_date, amount, and status visible.",
+            application="db_browser_sqlite",
+            prerequisite_videos=["video_1_1"],
+            exercise_artifact=orders_exercise,
+            format_tier="short",
+            key_concepts=[
+                "Related tables share columns such as customer_id.",
+                "Browsing a table lets you inspect raw data before any analysis.",
+                "Row counts tell you how many records a table contains.",
+            ],
+            demo_plan=[
+                {"action_description": "Click the Browse Data tab", "expected_observable_result": "Browse Data tab is active."},
+                {"action_description": "Select the Orders table from the table dropdown", "expected_observable_result": "Orders table rows and columns appear in the grid."},
+            ],
+            target_words=400,
+            has_recap=True,
+            recap_text_hint="In the last video we opened the Customers table and saw its columns and rows.",
+            has_preview=True,
+            preview_text_hint="Next we will sort the Orders table by amount to find the smallest and largest orders.",
+        ),
+        VideoManifest(
+            video_id="video_1_3",
+            title="Sort Orders by Amount Ascending",
+            learning_objective="Sort the Orders table by amount in ascending order so the smallest amount appears at the top.",
+            discovery_objective="Click the Amount column header in the Orders table so the smallest amount appears at the top and the largest amount appears at the bottom.",
+            application="db_browser_sqlite",
+            prerequisite_videos=["video_1_2"],
+            exercise_artifact=orders_exercise,
+            format_tier="short",
+            key_concepts=[
+                "Sorting rearranges rows without changing the underlying data.",
+                "Ascending order places the smallest value first.",
+                "A single click on a column header sorts ascending by default.",
+            ],
+            demo_plan=[
+                {"action_description": "Open the Orders table in Browse Data", "expected_observable_result": "Orders table is visible."},
+                {"action_description": "Click the Amount column header once", "expected_observable_result": "Rows reorder with the smallest amount at the top."},
+            ],
+            target_words=450,
+            has_recap=True,
+            recap_text_hint="In the last video we opened the Orders table and inspected its rows and columns.",
+            has_preview=True,
+            preview_text_hint="Next we will flip the sort to descending so the largest amounts appear at the top.",
+        ),
+        VideoManifest(
+            video_id="video_1_4",
+            title="Sort Orders by Amount Descending",
+            learning_objective="Sort the Orders table by amount in descending order so the largest amount appears at the top.",
+            discovery_objective="Click the Amount column header in the Orders table a second time so the largest amount appears at the top and the smallest amount appears at the bottom.",
+            application="db_browser_sqlite",
+            prerequisite_videos=["video_1_3"],
+            exercise_artifact=orders_exercise,
+            format_tier="short",
+            key_concepts=[
+                "Clicking the same column header again reverses the sort order.",
+                "Descending order places the largest value first.",
+                "Sorting is non-destructive: the original data stays unchanged.",
+            ],
+            demo_plan=[
+                {"action_description": "Open the Orders table in Browse Data", "expected_observable_result": "Orders table is visible."},
+                {"action_description": "Click the Amount column header twice", "expected_observable_result": "Rows reorder with the largest amount at the top."},
+            ],
+            target_words=450,
+            has_recap=True,
+            recap_text_hint="In the last video we sorted Orders by amount ascending, with the smallest amount at the top.",
+            has_preview=True,
+            preview_text_hint="Next we will filter the Orders table to show only rows from one region.",
+        ),
+        VideoManifest(
+            video_id="video_1_5",
+            title="Filter Orders by Status",
+            learning_objective="Filter the Orders table to show only rows where the status matches a chosen value.",
+            discovery_objective="Type a status value into the status filter box under the Orders table and press Return so only matching rows remain visible.",
+            application="db_browser_sqlite",
+            prerequisite_videos=["video_1_4"],
+            exercise_artifact=orders_exercise,
+            format_tier="short",
+            key_concepts=[
+                "Filtering reduces visible rows without deleting data.",
+                "The filter box under a column accepts a value and matches rows.",
+                "Pressing Return applies the filter and updates the row count.",
+            ],
+            demo_plan=[
+                {"action_description": "Open the Orders table in Browse Data", "expected_observable_result": "Orders table is visible."},
+                {"action_description": "Click the status filter box", "expected_observable_result": "Filter box is focused."},
+                {"action_description": "Type a status value and press Return", "expected_observable_result": "Only rows matching the status remain visible."},
+            ],
+            target_words=500,
+            has_recap=True,
+            recap_text_hint="In the last video we sorted Orders by amount descending, with the largest amount at the top.",
+        ),
+    ]
+
+    return CourseManifest(
+        course_id="sql_fundamentals_for_data_analysts",
+        title="SQL Fundamentals for Data Analysts",
+        description=(
+            "A hands-on introduction to exploring relational data in DB Browser for SQLite, "
+            "built around a stable e-commerce Customers and Orders dataset."
+        ),
+        target_audience="Beginner data analysts with no SQL experience",
+        videos=videos,
+        running_example={
+            "name": "E-commerce Orders and Customers",
+            "description": "A small online store dataset with a Customers table linked to an Orders table via customer_id.",
+            "schema": {
+                "Customers": {
+                    "customer_id": "INTEGER PRIMARY KEY",
+                    "customer_name": "TEXT",
+                    "country": "TEXT",
+                    "signup_date": "TEXT",
+                },
+                "Orders": {
+                    "order_id": "INTEGER PRIMARY KEY",
+                    "customer_id": "INTEGER",
+                    "order_date": "TEXT",
+                    "amount": "REAL",
+                    "status": "TEXT",
+                },
             },
         },
     )
