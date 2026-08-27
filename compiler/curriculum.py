@@ -236,9 +236,9 @@ def create_sql_fundamentals_for_data_analysts() -> CourseManifest:
     videos = [
         VideoManifest(
             video_id="video_1_1",
-            title="Browse the Customers Table",
-            learning_objective="Open the Customers table in DB Browser and inspect its rows and columns.",
-            discovery_objective="Open the Customers table in the Browse Data tab and display all rows with columns customer_id, customer_name, country, and signup_date visible.",
+            title="Browse and Explore the Customers Table",
+            learning_objective="Open the Customers table, sort by customer_id, and filter by country to explore the data interactively.",
+            discovery_objective="Open the Customers table in the Browse Data tab, sort by the customer_id column header, and filter by the country column to show only matching rows.",
             application="db_browser_sqlite",
             prerequisite_videos=[],
             exercise_artifact=customers_exercise,
@@ -247,10 +247,13 @@ def create_sql_fundamentals_for_data_analysts() -> CourseManifest:
                 "A database table stores data in rows and columns.",
                 "The Browse Data tab shows table contents without writing SQL.",
                 "Column headers reveal the structure of a table.",
+                "Sorting and filtering are fast ways to explore a table interactively.",
             ],
             demo_plan=[
                 {"action_description": "Click the Browse Data tab", "expected_observable_result": "Browse Data tab becomes active and the data grid is visible."},
                 {"action_description": "Select the Customers table from the table dropdown", "expected_observable_result": "Customers table rows and columns appear in the grid."},
+                {"action_description": "Click the customer_id column header", "expected_observable_result": "Rows reorder by customer_id."},
+                {"action_description": "Click the country filter box and type USA", "expected_observable_result": "Only rows where country equals USA remain visible."},
             ],
             target_words=400,
             has_preview=True,

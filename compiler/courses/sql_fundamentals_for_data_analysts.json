@@ -6,9 +6,9 @@
   "videos": [
     {
       "video_id": "video_1_1",
-      "title": "Browse the Customers Table",
-      "learning_objective": "Open the Customers table in DB Browser and inspect its rows and columns.",
-      "discovery_objective": "Open the Customers table in the Browse Data tab and display all rows with columns customer_id, customer_name, country, and signup_date visible.",
+      "title": "Browse and Explore the Customers Table",
+      "learning_objective": "Open the Customers table, sort by customer_id, and filter by country to explore the data interactively.",
+      "discovery_objective": "Open the Customers table in the Browse Data tab, sort by the customer_id column header, and filter by the country column to show only matching rows.",
       "application": "db_browser_sqlite",
       "prerequisite_videos": [],
       "exercise_artifact": {
@@ -17,7 +17,7 @@
         "description": "Customers table with customer_id, customer_name, country, and signup_date."
       },
       "format_tier": "short",
-      "estimated_duration_seconds": 143,
+      "estimated_duration_seconds": 75,
       "video_type": "demo",
       "new_capability": null,
       "key_concept": null,
@@ -32,7 +32,8 @@
       "key_concepts": [
         "A database table stores data in rows and columns.",
         "The Browse Data tab shows table contents without writing SQL.",
-        "Column headers reveal the structure of a table."
+        "Column headers reveal the structure of a table.",
+        "Sorting and filtering are fast ways to explore a table interactively."
       ],
       "demo_plan": [
         {
@@ -42,80 +43,150 @@
         {
           "action_description": "Select the Customers table from the table dropdown",
           "expected_observable_result": "Customers table rows and columns appear in the grid."
+        },
+        {
+          "action_description": "Click the customer_id column header",
+          "expected_observable_result": "Rows reorder by customer_id."
+        },
+        {
+          "action_description": "Click the country filter box and type USA",
+          "expected_observable_result": "Only rows where country equals USA remain visible."
         }
       ],
       "target_words": 400,
       "script_beats": [
         {
-          "beat_id": "beat_001",
           "kind": "opening",
-          "text": "In this lesson, we will open the Customers table in the Browse Data tab. Seeing the raw rows and columns is the first step before sorting, filtering, or writing any query.",
           "action": {
             "type": "wait",
             "duration": 1.5
-          }
+          },
+          "text": "In this lesson, we open the Customers table, sort, and filter to explore the data interactively.",
+          "beat_id": "beat_001"
         },
         {
-          "beat_id": "beat_002",
           "kind": "concept",
-          "text": "A database table stores information in rows and columns. Each row in the Customers table is one record, and each column is one attribute. The Customers table has 4 columns (customer_id, customer_name, country, signup_date) and 20 rows. Opening the table in the Browse Data tab lets us inspect this structure without changing anything, which is the safest way to read the data before we sort, filter, or query it. This gives us a clear, inspectable view of the data before any analysis."
+          "text": "The Customers table shows 20 rows with columns customer_id, customer_name, country, signup_date. Sorting reorders the rows without changing the stored data.",
+          "beat_id": "beat_002"
         },
         {
-          "beat_id": "beat_003",
           "kind": "demo",
-          "text": "We click the Browse Data tab.",
           "action": {
             "type": "click",
             "detail": "Browse Data tab",
             "target": {}
-          }
+          },
+          "text": "We click the Browse Data tab.",
+          "beat_id": "beat_003"
         },
         {
-          "beat_id": "beat_004",
-          "kind": "concept",
-          "text": "The Browse Data tab switches the view from the database structure to the data grid. This grid is where we view and interact with table rows visually instead of writing SQL. Once the tab is active, the Customers table can be selected and its 20 rows become visible. Every value remains stored safely in the database. The column headers confirm the structure we are working with. No underlying data is changed by this action."
+          "kind": "explain",
+          "text": "The data grid is now visible. We can select a table here and view its rows without writing SQL.",
+          "beat_id": "beat_004"
         },
         {
-          "beat_id": "beat_005",
           "kind": "validation",
-          "text": "We see that the Browse Data tab is active and the Customers table grid is visible, ready to display rows and columns.",
           "action": {
             "type": "verify",
             "detail": "Browse Data tab becomes active and the data grid is visible."
-          }
+          },
+          "text": "We see the Browse Data tab is active and the data grid is visible.",
+          "beat_id": "beat_005"
         },
         {
-          "beat_id": "beat_006",
           "kind": "demo",
-          "text": "We select the Customers table.",
           "action": {
             "type": "click",
             "detail": "Customers table in the table dropdown",
             "target": {}
-          }
+          },
+          "text": "We select the Customers table.",
+          "beat_id": "beat_006"
         },
         {
-          "beat_id": "beat_007",
-          "kind": "concept",
-          "text": "Selecting the Customers table loads its rows into the grid. The column headers now show customer_id, customer_name, country, signup_date, and every row represents one record. We can inspect the data directly and confirm the structure. This gives us a clear, inspectable view of the data before any analysis. We can repeat this exact action on any table in the database. This stable view lets us verify the result before moving on. Every value remains stored safely in the database."
+          "kind": "explain",
+          "text": "The Customers grid is loaded. Each row is a record, and the headers name the columns.",
+          "beat_id": "beat_007"
         },
         {
-          "beat_id": "beat_008",
           "kind": "validation",
-          "text": "We see 20 rows in the Customers table with columns customer_id, customer_name, country, signup_date, confirming the table is open and fully loaded.",
           "action": {
             "type": "verify",
             "detail": "Customers table rows and columns appear in the grid."
-          }
+          },
+          "text": "We see the Customers grid is loaded and matches the schema.",
+          "beat_id": "beat_008"
         },
         {
-          "beat_id": "beat_009",
+          "kind": "demo",
+          "action": {
+            "type": "click",
+            "detail": "Customer_id column header",
+            "target": {}
+          },
+          "text": "We click the Customer_id column header.",
+          "beat_id": "beat_009"
+        },
+        {
+          "kind": "explain",
+          "text": "The rows now reorder by Customer_id in ascending order. The stored data is unchanged; only the view is sorted.",
+          "beat_id": "beat_010"
+        },
+        {
+          "kind": "validation",
+          "action": {
+            "type": "verify",
+            "detail": "Rows reorder by customer_id."
+          },
+          "text": "We see the Customers table is sorted by Customer_id in ascending order.",
+          "beat_id": "beat_011"
+        },
+        {
+          "kind": "demo",
+          "action": {
+            "type": "sequence",
+            "actions": [
+              {
+                "type": "click",
+                "detail": "Country filter box"
+              },
+              {
+                "type": "type",
+                "detail": "USA",
+                "target": "Country filter box"
+              },
+              {
+                "type": "key",
+                "detail": "Return"
+              }
+            ],
+            "logical_unit": true
+          },
+          "text": "We click the Country filter box and type USA.",
+          "beat_id": "beat_012"
+        },
+        {
+          "kind": "explain",
+          "text": "The grid now shows only rows where Country matches USA. The status bar reflects the filtered count.",
+          "beat_id": "beat_013"
+        },
+        {
+          "kind": "validation",
+          "action": {
+            "type": "verify",
+            "detail": "Only rows where country equals USA remain visible."
+          },
+          "text": "We see the Customers table filtered by Country. The status bar shows the matching count.",
+          "beat_id": "beat_014"
+        },
+        {
           "kind": "close",
-          "text": "We have opened the Customers table and confirmed its structure. We can now browse any table in the database to see its raw rows and columns before sorting, filtering, or querying.",
           "action": {
             "type": "wait",
             "duration": 1.5
-          }
+          },
+          "text": "We opened, sorted, and filtered the Customers table. We can now explore any table interactively.",
+          "beat_id": "beat_015"
         }
       ]
     }

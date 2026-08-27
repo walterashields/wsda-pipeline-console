@@ -508,6 +508,52 @@ class TestLessonArc(unittest.TestCase):
             restore_tts(original)
 
 
+class TestAntiRepetition(unittest.TestCase):
+    def test_repeated_sentences_and_data_are_stripped(self) -> None:
+        """
+        C2: _strip_repetitive_sentences must remove verbatim repeats, near-
+        verbatim phrases (>60% word overlap), and reduce a beat to a neutral
+        confirmation when every sentence is a duplicate.
+        """
+        from compiler.lesson_builder import LessonBuilder
+
+        beats = [
+            ScriptBeat(
+                beat_id="beat_001",
+                kind="concept",
+                text="The Customers table has 20 rows and four columns. This gives us a clear view.",
+            ),
+            ScriptBeat(
+                beat_id="beat_002",
+                kind="explain",
+                text="This gives us a clear view of the data before any analysis.",  # near-verbatim
+            ),
+            ScriptBeat(
+                beat_id="beat_003",
+                kind="validation",
+                text="The Customers table has 20 rows and four columns.",  # verbatim repeat
+            ),
+            ScriptBeat(
+                beat_id="beat_004",
+                kind="close",
+                text="The Customers table has 20 rows and four columns. We opened the table.",  # one repeat
+            ),
+        ]
+        lb = LessonBuilder()
+        cleaned = lb._strip_repetitive_sentences(beats)
+
+        # Verbatim and near-verbatim duplicates are gone.
+        self.assertNotIn("This gives us a clear view.", [b.text for b in cleaned])
+        self.assertNotIn(
+            "The Customers table has 20 rows and four columns.",
+            [b.text for b in cleaned[1:]],
+        )
+        # The validation beat became a neutral confirmation.
+        self.assertEqual(cleaned[2].text, "We confirm the result on screen.")
+        # The close beat kept only its second sentence.
+        self.assertEqual(cleaned[3].text, "We opened the table.")
+
+
 def _pil_open(path: Path) -> Any:
     from PIL import Image
     return Image.open(str(path))
@@ -522,6 +568,7 @@ def main() -> int:
     suite.addTests(loader.loadTestsFromTestCase(TestTrimClipToMotion))
     suite.addTests(loader.loadTestsFromTestCase(TestRenderFromScript))
     suite.addTests(loader.loadTestsFromTestCase(TestLessonArc))
+    suite.addTests(loader.loadTestsFromTestCase(TestAntiRepetition))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     return 0 if result.wasSuccessful() else 1
